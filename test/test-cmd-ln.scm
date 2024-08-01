@@ -1,0 +1,1 @@
+(pretty-print (command-line-arguments))

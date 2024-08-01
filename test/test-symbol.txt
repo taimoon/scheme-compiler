@@ -1,0 +1,11 @@
+something
+#t
+#f
+#t
+#f
+#t
+(something something)
+#t
+"something"
+something
+#t

@@ -1,0 +1,13 @@
+(load "convert-labels.scm")
+(define (f)
+  (let recur ([i 0])
+    (if (>= i 13)
+        '()
+        (cons i (recur (add1 i))))))
+
+(let loop ([i 0] [len (length (f))])
+  (if (< i 10000)
+      (if (= len 13)
+          (loop (add1 i) (length (f)))
+          (pretty-print len))
+      (pretty-print (f))))
