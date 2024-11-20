@@ -4,7 +4,7 @@ This repo contains the compiler that compile scheme to i386 (or 32 bits of x86_6
 # Changelog
 I complete rewrote the compiler.
 
-Previous compiler ran slow in bootstrapping is due to a key pass in compilation.
+Previous compiler ran slow in bootstrapping is due to missing a key pass in compilation.
 One pass added is to lift the symbol interning to the top.
 Otherwise, previous compiler interns every symbol occur in program.
 When this pass added, the compiler can bootstrap within few seconds.
