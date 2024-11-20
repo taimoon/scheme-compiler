@@ -1,2 +1,0 @@
-4
-Exception: attempt to apply non-procedure ()

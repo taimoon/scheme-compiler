@@ -1,1034 +1,961 @@
-#;'(REGISTERS AND RUNTIMES
-  (emit "movl label,%eax")  ; deref and get the value
-  (emit "movl $label,%eax") ; get the address of value
+(import
+  (front)
+  (only (match) match)
+  (only (set) make-set set-union set-diff)
+  (only (utils)
+    make-env extend-env maybe-apply-env apply-env
+    read-sexps-from-path align-to-multiple
+    random-string symbol->id-symbol string->id-string generate-label
+    system*
+    path-fileroot path-filename))
+
+;;; alignment formula
+; (off + (8 - 1)) & -8 = (off & 7) + -8
+#|INTERNALS:
+;;;; Calling convention
+%ebp is used as closure pointer but caller-save.
+
+(i686
   (caller-save eax ecx edx)
-  (callee-save ebp ebx edi esi esp)
-  (invariant
-    (register ebp points to old-ebp)
-    (4(%ebp) always points to return-address)
-    (return-address is read-only))
-  
-  ; TCO will no work for greater arities function under cdecl convention
-  ; because you cannot overwrite the return address
-  ; in short, cdecl is not compatible with TCO for stack-based calling convention
-  ; therefore, a custom calling convention is adopted for this implementation
-  ; where arguments are pushed after ebp (i.e.: equivalent to 0 argument in cdecl)
-  #;((4 ret-addr)
-     (0(ebp) old-ebp) <--- esp
-     (-4 arg-N) 
-     ... 
-     (-4*(n-k) arg-k)
-     ...
-     (-4*n arg-0)
-     locals ...)
-  (x86
-    (
-    (4*n+8 argument-N)
-    ...
-    (16 argument-1)
-    (8  argument-0)
-    (4  ret-addr)
-    (0(ebp)     old-ebp)        <-- ebp
-    (-4         callee-save-0)  <-- esp*
-    ...
-    (-4*(n+1)   callee-save-n)
-    (-4*(n+2)   local-var-0)
-    ...
-    (-4*(n+m+2) local-var-m)    <-- esp
-    ))
-  (x86
-    (
-    (4*n+8 argument-N)
-    ...
-    (16 argument-1)
-    (8  argument-0)
-    (4  ret-addr)
-    (0(ebp)     old-ebp)      <-- ebp
-    (-4 edi)
-    (-8 esi)
-    (-16 ebx)
-    (-4*(n+5) local-var-0)
-    ...
-    (-4*(n+5) local-var-m)    <--- esp
-    ))
-  (TCC*
-    ((-si ret-addr)
-     (-si-1*wordsize old-ebp)
-     (-si-2*wordsize arg-0)
-     ...
-     (-si-(1+i)*wordsize arg-i)
-     ...
-     (-si-(1+n)*wordsize eval-si))
-    ((4 ret-addr)
-     (0(ebp) old-ebp) <--- esp
-     (-4 arg-0)
-     ... 
-     (-4*(k+1) arg-k)
-     ...
-     (-4*(n+1) si)))
-  (eax "accumulator register" "return value")
-  (ecx "counter register" "store argument counts")
-  (edx "data register" "dividend register")
-  (ebx "base register" "local register")
-  (esp "stack pointer register")
-  (ebp "stack base pointer register" "stack frame pointer")
-  (edi "destination index register" "local register")
-  (esi "source index register" "local register")
-  (eip "instruction pointer register")
-  (free ... -8 -4 0(%esp) 4 8 ... used)
-
-  (max-int on 64 bits
-    (define max-int (sub1 (expt 2 (- 63 3))))
-    (fixnum? max-int)
-    (fixnum? (add1 max-int))
-  )
+  (callee-save ebp ebx edi esi esp))
+(x64
+  (caller-save
+    rax rcx rdx rsi rdi r8 r9 r10 r11)
+  (callee-save
+    rbx rsp rbp r12 r13 r14 r15)
 )
-(load "utils.scm")
-(load "match.scm")
-(load "preprocessor.scm")
-
-(define wordsize 4)
-
-(define fixnum-shift 2)
-(define fixnum-mask 3)
-
-(define char-mask 255) ; character type mask
-(define char-shift 8)
-(define char-tag 7)
-
-(define bool-mask 255)
-(define bool-shift 8)
-(define bool-tag 15)
-(define bool-false-imm bool-tag)
-(define bool-true-imm (logior (ash 1 bool-shift) bool-tag))
-
-
-(define ptr-mask 7) ; mask for pointer type tag
-; the number is too large for the implementation
-; (define ptr-mask-inv #xfffffff8) ; mask for pointer value
-
-(define pair-tag 1)
-(define vec-tag 2)
-(define str-tag 3)
-(define sym-tag 5)
-(define closure-tag 6)
-
-(define emit
-  (lambda args
-    (apply format (cons #t args))
-    (newline)))
-
-(define (immediate? x)
-  (or (integer? x) (char? x) (boolean? x)))
-
-(define (immediate-rep x)
-  (cond
-    [(integer? x)
-     ;;; TODO: CALC THE MAX-INT AND MIN-INT
-     (if (<= x #xffffff)
-         (ash x fixnum-shift)
-         (error "immediate-rep" "integer-too-large" x))]
-    [(char? x) (logior (ash (char->integer x) char-shift) char-tag)]
-    [(boolean? x) (if x bool-true-imm bool-false-imm)]
-    [else (error "immediate-rep" "unknown-immediate" x)]))
-
-(define (emit-is-eax-equal-to val)
-  (emit "cmpl $~a, %eax" val)        ; check eax against val
-  (emit "movl $0, %eax")             ; zero eax but leaving equal flag in place
-  (emit "sete %al")                  ; set low bit of eax if they were equal
-  (emit "sall $~a, %eax" bool-shift) ; shift the bit up to the bool position
-  (emit "orl $~a, %eax" bool-tag))   ; add boolean type tag
-
-(define suffix-cmpl
-  '((< l)
-    (<= le)
-    (= e)
-    (> g)
-    (>= ge)))
-
-(define (compile-gc-flip sz si)
-  (emit "movl %ebp, (EBP)")
-  (emit "subl $~a, %esp" (- (abs si) wordsize))
-  (emit "movl %esp, (ESP)")
-  (cond [(integer? sz) (emit "movl $~a, %eax" (immediate-rep sz))]
-        [(eq? sz 'eax) #t]
-        [else (emit "movl $~a, %eax" (immediate-rep -1))])
-
-  (emit "pushl %eax")
-  (emit "call s_gc_flip")
-  (emit "popl %ecx")
-  (emit "addl $~a, %esp" (- (abs si) wordsize)))
-
-(define (compile-prim expr si env)
-  (match expr
-    [(procedure? ,k)
-     (compile-expr k si env)
-     (emit "andl $~a, %eax" ptr-mask)
-     (emit-is-eax-equal-to closure-tag)]
-    [(,cmp ,v ,w)
-     (guard (member cmp (map car suffix-cmpl)))
-     (compile-expr w si env)
-     (emit "movl %eax, ~a(%esp)" si)
-     (compile-expr v (- si wordsize) env)
-     (emit "cmpl ~a(%esp), %eax" si)
-     (emit "movl $0, %eax")
-     (emit "set~a %al" (car (apply-env cmp suffix-cmpl)))
-     (emit "sall $~a, %eax" bool-shift)
-     (emit "orl $~a, %eax" bool-tag)]
-    [(newline)
-     (emit "subl $~a, %esp" (abs si))
-     (emit "call s_newline")
-     (emit "addl $~a, %esp" (abs si))]
-    [(pretty-print ,v)
-     (compile-prim `(display ,v) si env)
-     (compile-prim `(newline) si env)]
-    [(display ,e)
-     (compile-expr e si env)
-     (emit "subl $~a, %esp" (abs si))
-     (emit "pushl %eax")
-     (emit "call s_show")
-     (emit "addl $~a, %esp" (+ (abs si) wordsize))]
-    [(char->integer ,v)
-     (compile-expr v si env)
-     (emit "shrl $~a, %eax" (- char-shift fixnum-shift))]
-    [(integer->char ,v)
-     (compile-expr v si env)
-     (emit "sall $~a, %eax" (- char-shift fixnum-shift))
-     (emit "orl $~a, %eax" char-tag)]
-    [(add1 ,v)
-     (compile-expr v si env)
-     (emit "addl $~a,%eax" (immediate-rep 1))]
-    [(sub1 ,v)
-     (compile-expr v si env)
-     (emit "subl $~a,%eax" (immediate-rep 1))]
-    [(char? ,v)
-     (compile-expr v si env)
-     (emit "andl $~a, %eax" char-mask)
-     (emit-is-eax-equal-to char-tag)]
-    [(integer? ,v)
-     (compile-expr v si env)
-     (emit "andl $~a, %eax" fixnum-mask)
-     (emit-is-eax-equal-to 0)]
-    [(boolean? ,v)
-     (compile-expr v si env)
-     (emit "andl $~a, %eax" bool-mask)
-     (emit-is-eax-equal-to bool-tag)]
-    [(char? ,v)
-     (compile-expr v si env)
-     (emit "andl $~a, %eax" char-mask)
-     (emit-is-eax-equal-to char-tag)]
-    [(zero? ,v)
-     (compile-expr v si env)
-     (emit-is-eax-equal-to 0)]
-    [(eq? ,v ,w)
-     (compile-expr w si env)
-     (emit "movl %eax, ~a(%esp)" si)
-     (compile-expr v (- si wordsize) env)
-     (emit "cmpl %eax, ~a(%esp)" si)
-     (emit "movl $0, %eax")
-     (emit "sete %al")
-     (emit "sall $~a, %eax" bool-shift)
-     (emit "orl $~a, %eax" bool-tag)]
-    [(vector? ,k)
-     (compile-expr k si env)
-     (emit "andl $~a, %eax" ptr-mask)
-     (emit-is-eax-equal-to vec-tag)]
-    [(vector . ,xs)
-     (compile-prim (list 'make-vector (length xs)) si env)
-     (emit "movl %eax, ~a(%esp)" si)
-     (for-each
-      (lambda (x i)
-        (compile-expr x (- si wordsize) env)
-        (emit "movl ~a(%esp), %ecx" si)
-        (emit "movl %eax, ~a(%ecx)" (- (* wordsize (add1 i)) vec-tag))
-        )
-      xs
-      (iota (length xs)))
-     (emit "movl ~a(%esp),%eax" si)]
-    [(make-vector ,k) (guard (integer? k))
-     (compile-gc-flip (* wordsize (add1 k)) si)
-     (emit "movl free_ptr, %eax")   ; store the pointer
-     (emit "movl $~a, 0(%eax)" k)   ; store the length
-     (emit "orl $~a, %eax" vec-tag) ; tag the pointer
-     (emit "addl $~a, (free_ptr)" (logand -8 (+ 11 (* wordsize k)))) ; advance allocation pointer
-     ]
-    [(make-vector ,k)
-     (compile-expr k si env)
-     (emit "movl %eax, ~a(%esp)" si)
-     (emit "addl $~a, %eax" (immediate-rep 1))
-     (emit "imul $~a, %eax" wordsize)
-     (compile-gc-flip 'eax (- si wordsize))
-     (emit "movl ~a(%esp), %eax" si)
-
-     (emit "shr $~a, %eax" fixnum-shift)  ; remove mask
-     (emit "movl free_ptr, %ecx")
-     (emit "movl %eax, 0(%ecx)")    ; store the length
-     (emit "movl %eax, %ecx")       ; store the length again
-     (emit "movl free_ptr, %eax")   ; store the pointer
-     (emit "orl $~a, %eax" vec-tag) ; tag the pointer
-
-     (emit "sall $2, %ecx")         ; multiply by 4 to get bytes 
-     (emit "addl $11, %ecx")
-     (emit "andl $-8, %ecx")
-     (emit "addl %ecx, (free_ptr)") ; advance allocation pointer
-     ]
-    [(vector-ref ,v ,k)
-     (guard (integer? k))
-     (compile-expr v si env)
-     (emit "movl ~a(%eax), %eax" (- (* (add1 k) wordsize) vec-tag))]
-    [(vector-ref ,v ,k)
-     (compile-expr v si env)
-     (emit "movl %eax, ~a(%esp)" si)
-     (compile-expr k (- si wordsize) env)
-     (emit "shrl $~a, %eax" (- fixnum-shift 2)) ; fixnum->idx (*4)
-     (emit "subl $~a, ~a(%esp)" vec-tag si)     ; untag
-     (emit "addl $~a, ~a(%esp)" wordsize si)    ; skip the length
-     (emit "addl ~a(%esp), %eax" si) ; add offset
-     (emit "movl (%eax),%eax")]
-    [(vector-set! ,s ,k ,c)
-     (guard (integer? k))
-     (compile-expr c si env) ; value
-     (emit "movl %eax, ~a(%esp)" si)
-     (compile-expr s si env) ; vector
-     (emit "movl ~a(%esp), %ecx" si)
-     (emit "movl %ecx, ~a(%eax)" (- (* (add1 k) wordsize) vec-tag))
-     (emit "xorl %eax, %eax")]
-    [(vector-set! ,s ,k ,c)
-     (compile-expr s si env)
-     (emit "movl %eax, ~a(%esp)" si)  ; vector
-     (compile-expr k (- si wordsize) env)
-     (emit "movl %eax, ~a(%esp)" (- si wordsize)) ; index
-     (compile-expr c (- si (* 2 wordsize)) env) ; value
-     ; store
-     (emit "movl ~a(%esp), %ecx" si)
-     (emit "subl $~a, %ecx" vec-tag)  ; untag
-     (emit "addl $~a, %ecx" wordsize) ; skip the length
-     (emit "shrl $~a, ~a(%esp)" (- fixnum-shift 2) (- si wordsize)) ; fixnum->idx (*4)
-     (emit "addl ~a(%esp), %ecx" (- si wordsize))
-     (emit "movl %eax, (%ecx)")
-     ; return 0
-     (emit "xorl %eax, %eax")]
-    [(vector-length ,v)
-     (compile-expr v si env)
-     (emit "movl ~a(%eax), %eax" (- vec-tag))
-     (emit "sall $~a, %eax" fixnum-shift) ; conver to fixnum
-     ]
-    [(string? ,k)
-     (compile-expr k si env)
-     (emit "andl $~a, %eax" ptr-mask)
-     (emit-is-eax-equal-to str-tag)]
-    [(make-string ,k) (guard (integer? k))
-     (compile-gc-flip (+ (add1 k) wordsize) si)
-     (emit "movl free_ptr, %eax")    ; store the pointer
-     (emit "movl $~a, 0(%eax)" k)    ; store the length
-     (emit "orl $~a, %eax" str-tag)  ; tag the pointer
-     ; 1 extra space for null
-     ; advance allocation pointer
-     (emit "addl $~a, (free_ptr)" (logand -8 (+ 11 (+ 1 k))))]
-    [(make-string ,k)
-     (compile-expr k si env)
-
-     (emit "movl %eax, ~a(%esp)" si)
-     (emit "addl $~a, %eax" (immediate-rep wordsize))
-     (compile-gc-flip 'eax (- si wordsize))
-     (emit "movl ~a(%esp), %eax" si)
-
-     (emit "shrl $~a, %eax" fixnum-shift) ; remove mask
-     (emit "movl free_ptr, %ecx")
-     (emit "movl %eax, 0(%ecx)")    ; store the length
-     (emit "movl %eax, %ecx")       ; store the length again
-     (emit "movl free_ptr, %eax")   ; store the pointer
-     (emit "orl $~a, %eax" str-tag) ; tag the pointer
-     
-     (emit "addl $1, %ecx")         ; extra space for null
-     (emit "addl $11, %ecx")
-     (emit "andl $-8, %ecx")
-     (emit "addl %ecx, (free_ptr)") ; advance allocation pointer
-     ]
-    [(string-length ,v)
-     (compile-expr v si env)
-     (emit "movl ~a(%eax), %eax" (- str-tag))
-     (emit "sall $~a, %eax" fixnum-shift) ; conver to fixnum
-     ]
-    [(string-ref ,v ,k)
-     (compile-expr v si env)
-     (emit "movl %eax, ~a(%esp)" si)
-     (compile-expr k (- si wordsize) env)
-     (emit "shrl $~a, %eax" fixnum-shift)    ; fixnum->index
-     (emit "subl $~a, ~a(%esp)" str-tag si)  ; untag
-     (emit "addl $~a, ~a(%esp)" wordsize si) ; skip the length
-     (emit "addl ~a(%esp), %eax" si)         ; add offset
-     (emit "movzbl (%eax),%eax")
-     (emit "sall $~a, %eax" char-shift)
-     (emit "orl $~a, %eax" char-tag)
-    ]
-    [(string-set! ,s ,k ,c)
-     (compile-expr s si env)
-     (emit "movl %eax, ~a(%esp)" si)
-     (compile-expr k (- si wordsize) env)
-     (emit "movl %eax, ~a(%esp)" (- si wordsize))
-     (compile-expr c (- si (* 2 wordsize)) env)
-     (emit "shrl $~a, %eax" char-shift) ; get character value
-     ; get index
-     (emit "movl ~a(%esp), %ecx" si)  ; store
-     (emit "subl $~a, %ecx" str-tag)  ; untag
-     (emit "addl $~a, %ecx" wordsize) ; skip the length
-     (emit "shrl $~a, ~a(%esp)" fixnum-shift (- si wordsize)) 
-     (emit "addl ~a(%esp), %ecx" (- si wordsize))
-     (emit "movb %al, (%ecx)")
-     (emit "xorl %eax, %eax") ; return 0
-     ]
-    [(symbol? ,s)
-     (compile-expr s si env)
-     (emit "andl $~a, %eax" ptr-mask)
-     (emit-is-eax-equal-to sym-tag)]
-    [(str->sym ,s)
-     (compile-expr s si env)
-     (emit "addl $~a, %eax" (- sym-tag str-tag))]
-    [(sym->str ,s)
-     (compile-expr s si env)
-     (emit "addl $~a, %eax" (- str-tag sym-tag))]
-    [(gc-flip ,v)
-     (compile-expr v si env)
-     (emit "movl %ebp, (EBP)")
-     (emit "subl $~a, %esp" (- (abs si) wordsize))
-     (emit "movl %esp, (ESP)")
-     (emit "pushl %eax")
-     (emit "call s_gc_flip")
-     (emit "popl %ecx")
-     (emit "addl $~a, %esp" (- (abs si) wordsize))]
-    [(cons ,v ,w)
-     (compile-expr v si env)
-     (emit "movl %eax, ~a(%esp)" si)
-     (compile-expr w (- si wordsize) env)
-     (emit "movl %eax, ~a(%esp)" (- si wordsize))
-     (compile-gc-flip (* 2 wordsize) (- si (* 2 wordsize)))
-     
-     (emit "movl ~a(%esp), %eax" (- si wordsize))
-     ; inline allocation on global pointer
-     (emit "movl free_ptr,%ecx")
-     (emit "addl $~a,(free_ptr)" (* 2 wordsize))
-     
-     ; store cdr
-     (emit "movl %eax, ~a(%ecx)" wordsize)
-     ; store car
-     (emit "movl ~a(%esp), %eax" si)
-     (emit "movl %eax, 0(%ecx)")
-     ; store the pointer and tag it
-     (emit "movl %ecx, %eax")
-     (emit "orl $~a, %eax" pair-tag)]
-    [(pair? ,k)
-     (let ([null-pred-lbl (generate-label "null_pred_lbl")]
-           [end (generate-label "pair_pred_end")])
-     (compile-expr k si env)
-     (emit "movl %eax, %ecx")
-     (emit "movl $~a, %edx" ptr-mask)
-     (emit "not %edx")
-     (emit "andl %edx, %ecx")   ; get pointer address
-     (emit "cmpl $0, %ecx")
-     (emit "je ~a" null-pred-lbl)
-     (emit "andl $~a, %eax" ptr-mask)   ; unmask to get the tag
-     (emit "cmpl $~a, %eax" pair-tag)   ; check eax against val
-     (emit "movl $0, %eax")             ; zero eax but leaving equal flag in place
-     (emit "sete %al")                  ; set low bit of eax if they were equal 
-     (emit "jmp ~a" end)
-     (emit "~a: " null-pred-lbl)
-     (emit "movl $0, %eax")
-     (emit "~a: " end)
-     (emit "sall $~a, %eax" bool-shift) ; shift the bit up to the bool position
-     (emit "orl $~a, %eax" bool-tag)    ; add boolean type tag
-     )]
-    [(null? ,v)
-     (compile-expr v si env)
-     (emit-is-eax-equal-to pair-tag)]
-    [(car ,v)
-     (compile-expr v si env)
-     (emit "movl ~a(%eax), %eax" (- pair-tag))]
-    [(cdr ,v)
-     (compile-expr v si env)
-     (emit "movl ~a(%eax), %eax" (- wordsize pair-tag))]
-    [(set-car! ,p ,v)
-     (compile-expr p si env)
-     (emit "movl %eax, ~a(%esp)" si)
-     (compile-expr v (- si wordsize) env)
-     (emit "movl ~a(%esp), %edx" si)
-     (emit "movl %eax, ~a(%edx)" (- pair-tag))]
-    [(set-cdr! ,p ,v)
-     (compile-expr p si env)
-     (emit "movl %eax, ~a(%esp)" si)
-     (compile-expr v (- si wordsize) env)
-     (emit "movl ~a(%esp), %edx" si)
-     (emit "movl %eax, ~a(%edx)" (- wordsize pair-tag))]
-    [(+ ,v ,w)
-     (compile-expr w si env)
-     (emit "movl %eax, ~a(%esp)" si)
-     (compile-expr v (- si wordsize) env)
-     (emit "addl ~a(%esp), %eax" si)]
-    [(+ ,v)
-     (compile-expr v (- si wordsize) env)]
-    [(- ,v)
-     (compile-expr v si env)
-     (emit "neg %eax")]
-    [(- ,v ,w)
-     (compile-expr w si env)
-     (emit "movl %eax, ~a(%esp)" si)
-     (compile-expr v (- si wordsize) env)
-     (emit "subl ~a(%esp), %eax" si)]
-    [(* ,v ,w)
-     (compile-expr w si env)
-     (emit "movl %eax, ~a(%esp)" si)
-     (compile-expr v (- si wordsize) env)
-     (emit "shrl $~a, %eax" fixnum-shift)
-     (emit "imul ~a(%esp), %eax" si)]
-    [(logand ,v ,w)
-     (compile-expr w si env)
-     (emit "movl %eax, ~a(%esp)" si)
-     (compile-expr v (- si wordsize) env)
-     (emit "andl ~a(%esp), %eax" si)]
-    [(logior ,v ,w)
-     (compile-expr w si env)
-     (emit "movl %eax, ~a(%esp)" si)
-     (compile-expr v (- si wordsize) env)
-     (emit "orl ~a(%esp), %eax" si)]
-    [(ashr ,v ,w)
-     (compile-expr w si env)
-     (emit "movl %eax, ~a(%esp)" si)
-     (compile-expr v (- si wordsize) env)
-     (emit "movl ~a(%esp), %ecx" si)
-     (emit "shrl $~a, %ecx" fixnum-shift)
-     (emit "shrl %cl, %eax")]
-    [(ashl ,v ,w)
-     (compile-expr w si env)
-     (emit "movl %eax, ~a(%esp)" si)
-     (compile-expr v (- si wordsize) env)
-     (emit "movl ~a(%esp), %ecx" si)
-     (emit "shrl $~a, %ecx" fixnum-shift)
-     (emit "sall %cl, %eax")]
-    [(apply ,f ,es)
-     (compile-apply f es si env)]
-    [,() (pretty-print expr) (error "compile-prim" "unknown-expression" expr)]
-    ))
-
-(define (compile-closure label free-vars si env)
-  (let ([var-n (length free-vars)])
-    ; creating closure
-    (compile-gc-flip (* wordsize (+ 2 var-n)) si)
-    (emit "movl free_ptr, %ecx")
-    (emit "movl $~a, 0(%ecx)" label)
-    (emit "movl $~a, 4(%ecx)" var-n)
-    (for-each
-      (lambda (v i)
-        (emit (apply-env v env))
-        (emit "movl %eax, ~a(%ecx)" (+ (* wordsize (+ 2 i)))))
-      free-vars (iota var-n))
-    (emit "movl %ecx, %eax")
-    (emit "orl $~a, %eax" closure-tag) ; tag the pointer
-    (emit "addl $~a, (free_ptr)" (logand -8 (+ 11 (* wordsize (+ 2 var-n))))) ; advance allocation pointer
-    ))
-
-(define (initialize-offsets offsets)
-  (for-each (lambda (offset) (emit "movl $0, ~a(%esp)" offset)) offsets))
-
-(define (compile-expr expr si env)
-  (match expr
-    [,v (guard (symbol? v))
-     (emit (apply-env v env))]
-    [,() (guard (immediate? expr))
-     (emit "movl $~a, %eax" (immediate-rep expr))]
-    ['() (emit "movl $~a, %eax" pair-tag)]
-    [,() (guard (string? expr))
-     (compile-prim `(make-string ,(string-length expr)) si env)
-     (let ([end (string-length expr)])
-        (let loop ([i 0])
-          (if (>= i end)
-              #t
-              (begin
-                (emit "movb $~a, ~a(%eax)"
-                  (char->integer (string-ref expr i))
-                  (+ (+ wordsize i) (- str-tag)))
-                (loop (add1 i))))))]
-    [(begin . ,es)
-     (for-each (lambda (e) (compile-expr e si env)) es)]
-    [(if ,pred ,conseq ,alter)
-     (let ([end-label (generate-label "end")]
-           [alter-label (generate-label "alter")])
-      (compile-expr pred si env)
-      (emit "cmpl $~a, %eax" (immediate-rep #f))
-      (emit "je ~a" alter-label)
-      (compile-expr conseq si env)
-      (emit "jmp ~a" end-label)
-      (emit "~a:" alter-label)
-      (compile-expr alter si env)
-      (emit "~a:" end-label))]
-    [(let ,bindings . ,body)
-     (let* (
-        [var-n (length bindings)]
-        [offsets (map (lambda (x) (- si (* x wordsize))) (iota var-n))]
-        [names (map car bindings)]
-        [es (map cadr bindings)]
-        [inner-si (- si (* var-n wordsize))]
-        [compiled-offsets
-         (map (lambda (offset)
-                (format "movl ~a(%esp), %eax" offset))
-              offsets)]
-        [inner-env (extend-env names compiled-offsets env)])
-      (initialize-offsets offsets)
-      (for-each
-        (lambda (expr offset)
-          (compile-expr expr inner-si env)
-          (emit "movl %eax, ~a(%esp)" offset))
-        es
-        offsets)
-      (compile-expr `(begin . ,body) inner-si inner-env))]
-    [(labelcall ,lbl ,es)
-     (compile-labelcall lbl es si env)]
-    [(label ,lbl)
-     (emit "movl $~a, %eax" lbl)]
-    [(prim ,() ,lbl)
-     (emit "movl ~a, %eax" lbl)
-     ;;; TODO: this is workaround when primitive is initialize using global construct
-     ;;; get the first element ; untag and skip the length
-     (emit "movl ~a(%eax),%eax" (- wordsize vec-tag))]
-    [(primcall ,op ,es)
-     (compile-prim (cons op es) si env)]
-    [(closure ,label ,free-vars)
-     (compile-closure label free-vars si env)]
-    [(funcall ,f ,es)
-     (compile-funcall f es si env)]
-    [(tailcall ,f ,es)
-     (compile-tailcall f es si env)]
-    [(foreign-call ,f ,es)
-     (compile-foreigncall f es si env)]
-    [,() (error "compile-expr" "unknown-expression" expr)]))
-
-(define (compile-tailcall f es si env)
-  (let* ([es (cons f es)]
-         [args-n (length es)]
-         [args-start si]
-         [offsets (map (lambda (i) (- args-start (* wordsize i)))
-                       (iota args-n))]
-         [eval-si (- args-start (* wordsize args-n))])
-    (initialize-offsets offsets)
-    (for-each
-      (lambda (e offset)
-        (compile-expr e eval-si env)
-        (emit "movl %eax, ~a(%esp)" offset))
-      es
-      offsets)
-    (compile-gc-flip (* wordsize args-n) eval-si)
-    
-    (emit "movl ~a(%esp), %eax" args-start)
-    (emit "movl ~a(%eax), %eax" (- closure-tag))
-    
-    (for-each
-      (lambda (i offset)
-        (emit "movl ~a(%esp), %ecx" offset)
-        (emit "movl %ecx, ~a(%ebp)" (* (- wordsize) (+ 1 i)))
-      )
-      (iota args-n) offsets)
-    
-    (emit "movl %ebp, %esp")
-    (emit "popl %ebp")
-    (emit "movl $~a, %ecx" args-n)
-    (emit "jmp *%eax")))
-
-(define (compile-funcall f es si env)
-  (let* ([es (cons f es)]
-         [args-n (length es)]
-         ; 2 bytes for ret-addr and old-ebp
-         [args-start (- si (* 2 wordsize))]
-         [offsets (map (lambda (i) (- args-start (* wordsize i)))
-                       (iota args-n))]
-         [eval-si (- args-start (* wordsize args-n))])
-    (initialize-offsets (append (list si (- si wordsize) args-start) offsets))
-    (for-each
-      (lambda (e offset)
-        (compile-expr e eval-si env)
-        (emit "movl %eax, ~a(%esp)" offset))
-      es
-      offsets)
-    (compile-gc-flip (* wordsize args-n) eval-si)
-    
-    ; stack pointer from ... -si+4 are used up, then we substract the pointer by si-4
-    (emit "movl ~a(%esp), %eax" args-start)
-    (emit "movl ~a(%eax), %eax" (- closure-tag))
-    (emit "subl $~a, %esp" (- (abs si) wordsize))
-    (emit "movl $~a, %ecx" args-n)
-    (emit "call *%eax")
-    (emit "addl $~a, %esp" (- (abs si) wordsize))
-    ))
-
-(define (compile-labelcall label es si env)
-  (let* ([args-n (length es)]
-         ; 2 bytes for ret-addr and old-ebp
-         [args-start (- si (* 2 wordsize))]
-         [offsets (map (lambda (i) (- args-start (* wordsize i)))
-                       (iota args-n))]
-         [eval-si (- args-start (* wordsize args-n))])
-    (initialize-offsets (append (list si (- si wordsize) args-start) offsets))
-    (for-each
-      (lambda (e offset)
-        (compile-expr e eval-si env)
-        (emit "movl %eax, ~a(%esp)" offset))
-      es
-      offsets)
-    (emit "movl $~a, %ecx" args-n)
-    ; stack pointer from ... -si+4 are used up, then we substract the pointer by si-4
-    (if (and (pair? label) (eq? (car label) 'label))
-        (begin
-          (emit "subl $~a, %esp" (- (abs si) wordsize))
-          (emit "call ~a" (cadr label)))
-        (begin
-          (compile-expr label eval-si env)
-          (emit "subl $~a, %esp" (- (abs si) wordsize))
-          (emit "call *%eax")))
-    (emit "addl $~a, %esp" (- (abs si) wordsize))))
-
-(define (compile-foreigncall f es si env)
-  (let* ([es (reverse es)]
-         [args-n (length es)]
-         [args-start si]
-         [offsets (map (lambda (i) (- args-start (* wordsize i)))
-                       (iota args-n))]
-         [eval-si (- args-start (* wordsize args-n))])
-    (initialize-offsets (cons eval-si offsets))
-    (for-each
-      (lambda (e offset)
-        (compile-expr e eval-si env)
-        (emit "movl %eax, ~a(%esp)" offset))
-      es
-      offsets)
-    
-    (emit "subl $~a, %esp" (abs (+ eval-si wordsize)))
-    (emit "call ~a" f)
-    (emit "addl $~a, %esp" (abs (+ eval-si wordsize)))))
-
-
-(define (emit-L-apply)
-  #;(
-    (0(%esp) ret-addr)
-    (-4 old-ebp)
-    (-8 closure) ; confirmed
-    (-12 arg-1)  ; confirmed by empty list
+;;;; Data Repr
+;;; Tag allocations
+fixnum
+  (b snnn nnnn nnnn nnnn nn00)
+immediate
+  (b xxxx xxxx xxxx iiii i111)
+pointer
+  (
+  type      ttt
+  fx        000
+  pair      001
+  vector    010
+  string    011
+  fx        100
+  symbol    101
+  closure   110
+  imm       111
   )
-  (let ([loop (generate-label 'loop)]
-        [end (generate-label 'end)])
-    ; eax scratch
-    ; ecx arg-n
-    ; edx holding list-args
-    ; esp moving pointer (invariant, used as scratch, shall be restored)
-    (emit ".globl L_apply")
-    (emit "L_apply:")
-    
-    (emit "movl $1, %ecx")
+  (b pppp pppp pppp pppp pttt)
+;;; Composite Data Representation
+; We see that fx-* can further encode certain information
+; like immutable or mutable
+; like static or dynamic allocated
 
-    (emit "movl %ebp, ~a(%esp)" (- wordsize)) ; store old-ebp
-    (emit "movl %esp, %ebp")                  ; store the old-esp
-    
-    (emit "movl ~a(%esp), %edx" (* 3 (- wordsize))) ; store arg-1 into %edx
-    
-    (emit "subl $~a, %esp" (* 3 wordsize))
-    
-    
-    (emit "~a: " loop)
-    (emit "cmpl $~a, %edx" pair-tag)
-    (emit "je ~a" end)
-    (emit "movl ~a(%edx), %eax" (- pair-tag))
-    (emit "movl %eax, (%esp)")
+; fx-free-vars-counts is not queryable programmatically
+; being used for garbage collector
+; encode whether it is for closure or static
+; workaround optimization is to initalize the labels statically
+pair
+  (car cdr)
+vector
+  (fx-vector-length a0 a1 ...)
+string
+  (fx-str-length c0 c1 ... #\nul)
+symbol
+  ->string
+closure
+  ; allocated lambda
+  (code-pointer fx-free-vars-counts&lambda fv0 fv1 ...)
+  ; static
+  (code-pointer 1)
+|#
 
-    (emit "movl ~a(%edx), %edx" (- wordsize pair-tag))
-    (emit "subl $~a, %esp" wordsize)
-    (emit "inc %ecx")
-    (emit "jmp ~a" loop)
-    (emit "~a: " end)
+#|TODO:
+- optimize known call like label-call, how it can be tail call
+- simpler implementation of converting letrec
+- %esi shall be used as the heap pointer
+- inline requested size check rather than rely on gc-flip
+|#
 
-    (emit "movl %ebp, %esp") ; restore old-esp
-    (emit "movl ~a(%esp), %ebp" (- wordsize)) ; restore old-ebp
-    (emit "movl ~a(%esp), %eax" (* 2 (- wordsize)))
-    (emit "movl ~a(%eax), %eax" (- closure-tag))
-    (emit "jmp *%eax")
+(define FIXNUM-MASK   #b00000011)
+(define FIXNUM-TAG    #b00000000)
+(define FIXNUM-SHIFT  2)
+(define IMM-SHIFT     8)
+(define IMM-MASK      #b11111111)
+(define CHAR-TAG      #b00001111)
+(define BOOL-TAG      #b00011111)
+(define NIL-TAG       #b01011111)
+(define FALSE-IMM BOOL-TAG)
+(define TRUE-IMM (bitwise-ior (ash 1 IMM-SHIFT) BOOL-TAG))
+(define PTR-MASK      #b00000111)
+(define PAIR-TAG      #b00000001)
+(define VEC-TAG       #b00000010)
+(define STR-TAG       #b00000011)
+(define SYM-TAG       #b00000101)
+(define CLOS-TAG      #b00000110)
+
+(define WORDSIZE 4)
+
+;;; emit
+(define (emit op . args)
+  (apply format (cons op args))
+  (newline op))
+
+(define (immediate? v)
+  (or (integer? v) (boolean? v) (char? v)))
+
+(define (immediate-rep imm)
+  (cond
+    ((char? imm)
+     (bitwise-ior CHAR-TAG
+                  (ash (char->integer imm)
+                       IMM-SHIFT)))
+    ((boolean? imm)
+     (if imm TRUE-IMM FALSE-IMM))
+    ((integer? imm)
+     (ash imm FIXNUM-SHIFT))
+    ((null? imm)
+     NIL-TAG)
+    (else (error "immediate-rep" "unknown immediate" imm))))
+
+(define (emit-seq op es si env)
+  (for-each
+    (lambda (e) (emit-expr op e si env))
+    es))
+
+(define (emit-eax=? op v)
+  (emit op "cmp $~a, %eax" v)
+  (emit op "sete %al")
+  (emit op "sal $~a, %eax" IMM-MASK)
+  (emit op "or $~a, %eax" BOOL-TAG))
+
+(define suffix-cmp
+  '((< setl jl)
+    (<= setle jle)
+    (= sete je)
+    (> setg jg)
+    (>= setge jge)))
+
+(define (emit-cmp op cmp e1 e2 si env)
+  (emit-expr op e1 si env)
+  (emit op "mov %eax, ~a(%esp)" si)
+  (emit-expr op e2 (- si WORDSIZE) env)
+  (emit op "cmp %eax, ~a(%esp)" si)
+  (emit op "mov $0, %eax")
+  (emit op "~a %al" (cadr (assq cmp suffix-cmp)))
+  (emit op "sal $~a, %eax" IMM-SHIFT)
+  (emit op "or $~a, %eax" BOOL-TAG))
+
+(define (emit-let op bindings body si env)
+ (let recur ((bindings bindings)
+             (si si)
+             (inner-env env))
+    (if (pair? bindings)
+        (begin
+          (emit-expr op (cadar bindings) si env)
+          (emit op "mov %eax, ~a(%esp)" si)
+          (recur
+            (cdr bindings)
+            (- si WORDSIZE)
+            (extend-env (caar bindings) (format "mov ~a(%esp), %eax" si) inner-env)))
+        (emit-seq op body si inner-env))))
+
+(define (emit-if op pred conseq altern si env)
+  (let ((end-label (generate-label "end"))
+        (altern-label (generate-label "altern")))
+    (emit-expr op pred si env)
+    (emit op "cmp $~a, %eax" FALSE-IMM)
+    (emit op "je ~a" altern-label)
+    (emit-expr op conseq si env)
+    (emit op "jmp ~a" end-label)
+    (emit op "~a: " altern-label)
+    (emit-expr op altern si env)
+    (emit op "~a: " end-label)))
+
+(define (emit-str-lit op s si)
+  (emit-walk-stack op (+ (add1 (string-length s)) WORDSIZE) si (make-env))
+  (emit op "mov free_ptr, %eax")
+  (emit op "addl $~a, (free_ptr)"
+           (align-to-multiple 8 (+ WORDSIZE (+ 1 (string-length s)))))
+  (emit op "movl $~a, (%eax)" (immediate-rep (string-length s)))
+  (for-each
+    (lambda (i)
+      (emit op "movb $~a, ~a(%eax)"
+               (char->integer (string-ref s i))
+               (+ WORDSIZE i)))
+    (iota (string-length s)))
+  (emit op "movb $0, ~a(%eax)" (+ WORDSIZE (string-length s)))
+  (emit op "or $~a, %eax" STR-TAG))
+
+(define (emit-vector op es si env)
+  (let ((sz (length es)))
+    (emit-walk-stack op (* (+ sz 1) WORDSIZE) si (make-env))
+    (emit op "mov free_ptr, %eax")
+    (emit op "movl $~a, (%eax)" (immediate-rep sz))
+    (emit op "addl $~a, free_ptr" (align-to-multiple 8 (* (+ sz 1) WORDSIZE)))
+    (emit op "or $~a, %eax" VEC-TAG)
+    (emit op "mov %eax, ~a(%esp)" si)
+    (if (<= sz 0)
+        #t
+        (begin
+          (for-each
+            (lambda (i e)
+              (emit-expr op e (- si WORDSIZE) env)
+              (emit op "mov ~a(%esp), %ecx" si)
+              (emit op "mov %eax, ~a(%ecx)" (- (* (+ i 1) WORDSIZE) VEC-TAG)))
+            (iota sz)
+            es)
+          (emit op "mov %ecx, %eax")))))
+
+(define (emit-prim op e si env)
+  (match e
+    ((%walk-stack)
+     (emit-walk-stack op -1 si env))
+    ((%walk-stack ,e)
+     (emit-walk-stack op e si env))
+    ((integer? ,e)
+     (emit-expr op e si env)
+     (emit op "and $~a, %eax" FIXNUM-MASK)
+     (emit-eax=? op FIXNUM-TAG))
+    ((boolean? ,e)
+     (emit-expr op e si env)
+     (emit op "and $~a, %eax" IMM-MASK)
+     (emit-eax=? op BOOL-TAG))
+    ((char? ,e)
+     (emit-expr op e si env)
+     (emit op "and $~a, %eax" IMM-MASK)
+     (emit-eax=? op CHAR-TAG))
+    ((char->integer ,e)
+     (emit-expr op e si env)
+     (emit op "sar $~a, %eax" (- IMM-SHIFT FIXNUM-SHIFT)))
+    ((integer->char ,e)
+     (emit-expr op e si env)
+     (emit op "sal $~a, %eax" (- IMM-SHIFT FIXNUM-SHIFT))
+     (emit op "or $~a, %eax" CHAR-TAG))
+    ((eq? ,e1 ,e2)
+     (emit-cmp op '= e1 e2 si env))
+    ((,cmp ,e1 ,e2)
+     (guard (assoc cmp suffix-cmp))
+     (emit-cmp op cmp e1 e2 si env))
+    ((- ,e)
+     (emit-expr op e si env)
+     (emit op "neg %eax"))
+    ((- ,e1 ,e2)
+     (emit-expr op e2 si env)
+     (emit op "mov %eax, ~a(%esp)" si)
+     (emit-expr op e1 (- si WORDSIZE) env)
+     (emit op "sub ~a(%esp), %eax" si))
+    ((+ ,e1 ,e2)
+     (emit-expr op e2 si env)
+     (emit op "mov %eax, ~a(%esp)" si)
+     (emit-expr op e1 (- si WORDSIZE) env)
+     (emit op "add ~a(%esp), %eax" si))
+    ((* ,e1 ,e2)
+     (emit-expr op e2 si env)
+     (emit op "mov %eax, ~a(%esp)" si)
+     (emit-expr op e1 (- si WORDSIZE) env)
+     (emit op "sar $~a, %eax" FIXNUM-SHIFT)
+     (emit op "imul ~a(%esp), %eax" si))
+    ((div ,dividend ,divisor)
+     #;((div (* t x) (* t y))
+        => (div x y)
+        => (tag (div x y)))
+     (emit-expr op divisor si env)
+     (emit op "mov %eax, ~a(%esp)" si)
+     (emit-expr op dividend (- si WORDSIZE) env)
+     (emit op "mov ~a(%esp), %ecx" si)
+     (emit op "cdq")
+     (emit op "idiv %ecx")
+     (emit op "sal $~a, %eax" FIXNUM-SHIFT))
+    ((mod ,dividend ,divisor)
+     ;;; TODO: don't know why this works?
+     (emit-expr op divisor si env)
+     (emit op "movl %eax, ~a(%esp)" si)
+     (emit-expr op dividend (- si WORDSIZE) env)
+     (emit op "mov ~a(%esp), %ecx" si)
+     (emit op "cdq")
+     (emit op "idiv %ecx")
+     (emit op "mov %edx, %eax"))
+    ((ashl ,e1 ,e2)
+     (emit-expr op e2 si env)
+     (emit op "mov %eax, ~a(%esp)" si)
+     (emit-expr op e1 (- si WORDSIZE) env)
+     (emit op "mov ~a(%esp), %ecx" si)
+     (emit op "sar $~a, %ecx" FIXNUM-SHIFT)
+     (emit op "sal %cl, %eax"))
+    ((ashr ,e1 ,e2)
+     (emit-expr op e2 si env)
+     (emit op "mov %eax, ~a(%esp)" si)
+     (emit-expr op e1 (- si WORDSIZE) env)
+     (emit op "mov ~a(%esp), %ecx" si)
+     (emit op "sar $~a, %ecx" FIXNUM-SHIFT)
+     (emit op "sar $~a, %eax" FIXNUM-SHIFT)
+     (emit op "sar %cl, %eax")
+     (emit op "sal $~a, %eax" FIXNUM-SHIFT))
+    ((bitwise-and ,e1 ,e2)
+     (emit-expr op e2 si env)
+     (emit op "mov %eax, ~a(%esp)" si)
+     (emit-expr op e1 (- si WORDSIZE) env)
+     (emit op "and ~a(%esp), %eax" si))
+    ((bitwise-ior ,e1 ,e2)
+     (emit-expr op e2 si env)
+     (emit op "mov %eax, ~a(%esp)" si)
+     (emit-expr op e1 (- si WORDSIZE) env)
+     (emit op "or ~a(%esp), %eax" si))
+    ((null? ,e)
+     (emit-expr op e si env)
+     (emit op "and $~a, %eax" IMM-MASK)
+     (emit-eax=? op NIL-TAG))
+    ((pair? ,e)
+     (emit-expr op e si env)
+     (emit op "and $~a, %eax" PTR-MASK)
+     (emit-eax=? op PAIR-TAG))
+    ((cons ,e1 ,e2)
+     (emit-expr op e1 si env)
+     (emit op "mov %eax, ~a(%esp)" si)
+     (emit-expr op e2 (- si WORDSIZE) env)
+     
+     (emit op "mov %eax, ~a(%esp)" (- si WORDSIZE))
+     (emit-walk-stack op (* 2 WORDSIZE) (- si (* 2 WORDSIZE)) (make-env))
+     
+     (emit op "mov free_ptr, %ecx")
+     (emit op "addl $~a, (free_ptr)" (* 2 WORDSIZE))
+     (emit op "mov ~a(%esp), %eax" (- si WORDSIZE))
+     (emit op "mov %eax, ~a(%ecx)" WORDSIZE)
+     (emit op "mov ~a(%esp), %eax" si)
+     (emit op "mov %eax, (%ecx)")
+     (emit op "mov %ecx, %eax")
+     (emit op "or $~a, %eax" PAIR-TAG))
+    ((car ,e)
+     (emit-expr op e si env)
+     (emit op "mov ~a(%eax), %eax" (- PAIR-TAG)))
+    ((cdr ,e)
+     (emit-expr op e si env)
+     (emit op "mov ~a(%eax), %eax" (- WORDSIZE PAIR-TAG)))
+    ((set-car! ,e ,v)
+     (emit-expr op v si env)
+     (emit op "mov %eax, ~a(%esp)" si)
+     (emit-expr op e (- si WORDSIZE) env)
+     (emit op "mov ~a(%esp), %ecx" si)
+     (emit op "mov %ecx, ~a(%eax)" (- PAIR-TAG)))
+    ((set-cdr! ,e ,v)
+     (emit-expr op v si env)
+     (emit op "mov %eax, ~a(%esp)" si)
+     (emit-expr op e (- si WORDSIZE) env)
+     (emit op "mov ~a(%esp), %ecx" si)
+     (emit op "mov %ecx, ~a(%eax)" (- WORDSIZE PAIR-TAG)))
+    ((string? ,e)
+     (emit-expr op e si env)
+     (emit op "and $~a, %eax" PTR-MASK)
+     (emit-eax=? op STR-TAG))
+    ((make-string ,k)
+     (emit-expr op `(prim-call make-string ,k #\nul) si env))
+    ((make-string ,k ,ch)
+     (emit-expr op ch si env)
+     (emit op "mov %eax, ~a(%esp)" si)
+     (emit-expr op k (- si WORDSIZE) env)
+     (emit op "mov %eax, ~a(%esp)" (- si WORDSIZE))
+
+     (emit op "add $~a, %eax" (immediate-rep (add1 WORDSIZE)))
+     (emit-walk-stack op '%eax (- si (* 2 WORDSIZE)) (make-env))
+     
+     (emit op "mov free_ptr, %edx")
+     (emit op "mov free_ptr, %edi")
+     (emit op "mov ~a(%esp), %eax" (- si WORDSIZE))
+     (emit op "mov %eax, (%edi)") ; store the length
+     ; align and fill
+     (emit op "sar $~a, %eax" FIXNUM-SHIFT)
+     (emit op "mov %eax, %ecx")   ; store the length again
+     (emit op "add $12, %eax")    ; extra space for null (11 + 1)
+     (emit op "and $-8, %eax")
+     (emit op "add %eax, (free_ptr)")
+     (emit op "add $~a, %edi" WORDSIZE)
+     (emit op "mov ~a(%esp), %eax" si)  ; restore the character
+     (emit op "sar $~a, %eax" IMM-SHIFT)
+     (emit op "cld")
+     (emit op "rep stosb")
+     (emit op "movb $~a, (%edi)" (char->integer #\nul))
+     (emit op "mov %edx, %eax")
+     (emit op "or $~a, %eax" STR-TAG))
+    ((string-length ,s)
+     (emit-expr op s si env)
+     (emit op "mov ~a(%eax), %eax" (- STR-TAG)))
+    ((string-set! ,s ,i ,v)
+     (emit-expr op v si env)
+     (emit op "mov %eax, ~a(%esp)" si)
+     (emit-expr op i (- si WORDSIZE) env)
+     (emit op "mov %eax, ~a(%esp)" (- si WORDSIZE))
+     (emit-expr op s (- si (* 2 WORDSIZE)) env)
+     (emit op "mov ~a(%esp), %ecx" (- si WORDSIZE))
+     (emit op "sarl $~a, %ecx" FIXNUM-SHIFT) ; remove fixnum mask
+     (emit op "add %ecx, %eax")
+     (emit op "mov ~a(%esp), %ecx" si)
+     (emit op "sar $~a, %ecx" IMM-SHIFT) ; remove char mask
+     (emit op "movb %cl, ~a(%eax)" (- WORDSIZE STR-TAG))
+     (emit op "xor %eax, %eax"))
+    ((string-ref ,s ,i)
+     (emit-expr op i si env)
+     (emit op "mov %eax, ~a(%esp)" si)
+     (emit-expr op s (- si WORDSIZE) env)
+     (emit op "mov ~a(%esp), %ecx" si)
+     (emit op "sarl $~a, %ecx" FIXNUM-SHIFT) ; remove fixnum mask
+     (emit op "add %ecx, %eax")
+     (emit op "movzbl ~a(%eax), %eax" (- WORDSIZE STR-TAG))
+     (emit op "sal $~a, %eax" IMM-SHIFT)
+     (emit op "or $~a, %eax" CHAR-TAG))
+    ((vector? ,e)
+     (emit-expr op e si env)
+     (emit op "and $~a, %eax" PTR-MASK)
+     (emit-eax=? op VEC-TAG))
+    ((vector . ,es)
+     (emit-vector op es si env))
+    ((vector-length ,e)
+     (emit-expr op e si env)
+     (emit op "mov ~a(%eax), %eax" (- VEC-TAG)))
+    ((make-vector ,k)
+     (emit-expr op k si env)
+     (emit op "mov %eax, ~a(%esp)" si)
+
+     (emit op "imul $~a, %eax" WORDSIZE)
+     (emit op "add $~a, %eax" (immediate-rep WORDSIZE))
+     (emit-walk-stack op '%eax (- si WORDSIZE) (make-env))
+     
+     (emit op "mov ~a(%esp), %eax" si)
+     (emit op "mov free_ptr, %edx")
+     (emit op "mov free_ptr, %edi")
+     (emit op "mov %eax, (%edi)") ; store the length
+     (emit op "mov %eax, %ecx")
+     (emit op "add $11, %ecx")
+     (emit op "and $-8, %ecx")
+     (emit op "add %ecx, (free_ptr)")
+     (emit op "mov free_ptr, %edi")
+     (emit op "lea ~a(%edx), %edi" WORDSIZE)
+     (emit op "mov %eax, %ecx")
+     (emit op "sal $~a, %ecx" FIXNUM-SHIFT)
+     (emit op "mov $0, %eax")
+     (emit op "rep stosw")
+     (emit op "mov %edx, %eax")
+     (emit op "or $~a, %eax" VEC-TAG))
+    ((vector-ref ,v ,i)
+     (emit-expr op i si env)
+     (emit op "mov %eax, ~a(%esp)" si)
+     (emit-expr op v (- si WORDSIZE) env)
+     (emit op "add ~a(%esp), %eax" si)
+     (emit op "mov ~a(%eax), %eax" (- WORDSIZE VEC-TAG)))
+    ((vector-set! ,v ,i ,e)
+     (emit-expr op e si env)
+     (emit op "mov %eax, ~a(%esp)" si)
+     (emit-expr op i (- si WORDSIZE) env)
+     (emit op "mov %eax, ~a(%esp)" (- si WORDSIZE))
+     (emit-expr op v (- si (* WORDSIZE 2)) env)
+     (emit op "add ~a(%esp), %eax" (- si WORDSIZE))
+     (emit op "mov ~a(%esp), %ecx" si)
+     (emit op "mov %ecx, ~a(%eax)" (- WORDSIZE VEC-TAG))
+     (emit op "mov %ecx, %eax"))
+    ((procedure? ,e)
+     (emit-expr op e si env)
+     (emit op "and $~a, %eax" PTR-MASK)
+     (emit-eax=? op CLOS-TAG))
+    ((symbol? ,e)
+     (emit-expr op e si env)
+     (emit op "and $~a, %eax" PTR-MASK)
+     (emit-eax=? op SYM-TAG))
+    ((%string->symbol ,e)
+     (emit-expr op e si env)
+     (emit op "add $~a, %eax" (- SYM-TAG STR-TAG)))
+    ((%symbol->string ,e)
+     (emit-expr op e si env)
+     (emit op "sub $~a, %eax" (- SYM-TAG STR-TAG)))
+    (,() (error "emit-prim" "unmatch" e))))
+
+(define (emit-walk-stack op e si env)
+  (cond
+    ((not e)
+     (emit op "mov $~a, %eax" (immediate-rep -1)))
+    ((eq? e '%eax) #t)
+    (else (emit-expr op e si env)))
+  (emit op "lea ~a(%esp), %ecx" (+ si WORDSIZE))
+  (emit op "mov %esp, %edx")
+  (emit op "sub $~a, %esp" (- (abs si) WORDSIZE))
+  (emit op "push %edx")
+  (emit op "push %ecx")
+  (emit op "push %eax")
+  (emit op "call walk_stack")
+  (emit op "add $~a, %esp" (+ (abs si) (* 2 WORDSIZE)))
+  (emit op "mov ~a(%esp), %ebp" (- WORDSIZE))
+  )
+
+(define (emit-tail-call op fn args si env)
+  (let* ((argc (length (cons fn args)))
+         (calc-offset (lambda (i) (- si (* WORDSIZE i)))))
+    (for-each
+      (lambda (offset arg)
+        (emit-expr op arg offset env)
+        (emit op "mov %eax, ~a(%esp)" offset))
+      (map calc-offset (iota argc))
+      (cons fn args))
+    
+    ;;; NOTE: It's easier to collect before entering variadic function.
+    (emit-walk-stack op argc (calc-offset argc) env)
+    ;;; copying the memory
+    (for-each
+      (lambda (i)
+        (emit op "mov ~a(%esp), %eax" (calc-offset i))
+        (emit op "mov %eax, ~a(%esp)" (* (- WORDSIZE) (+ i 1))))
+      (iota argc))
+    #;(begin
+      #|
+      ;;; copying the memory (alternative impl)
+      but it slow down the compiler significantly (4x times)
+      possible reason:
+      - alignment
+      - function usually is not called with too many arguments
+      |#
+      (emit op "lea ~a(%esp), %esi" si)
+      (emit op "lea ~a(%esp), %edi" (- WORDSIZE))
+      (emit op "mov $~a, %ecx" argc)
+      (emit op "std") ;;; set the flag to decrement stack pointer while copying
+      (emit op "rep movsl")
+      (emit op "cld") ;;; maintain the invariant that copying is incrementing
+    )
+    
+    (emit op "mov $~a, %ecx" argc)
+    (emit op "mov ~a(%esp), %eax" (- WORDSIZE))
+    (emit op "mov ~a(%eax), %eax" (- CLOS-TAG))
+    (emit op "add $~a, %esp" WORDSIZE)
+    (emit op "jmp *%eax")))
+
+(define (emit-call op fn args si env)
+  (let* ((argc (length (cons fn args)))
+         (start-si (- si (* 2 WORDSIZE)))
+         (calc-offset (lambda (i) (- start-si (* WORDSIZE i)))))
+    (emit op "movl $0, ~a(%esp)" si)
+    (emit op "movl %esp, ~a(%esp)" (- si WORDSIZE))
+    (for-each
+      (lambda (offset arg)
+        (emit-expr op arg offset env)
+        (emit op "mov %eax, ~a(%esp)" offset))
+      (map calc-offset (iota argc))
+      (cons fn args))
+    ;;; NOTE: It's easier to collect before entering variadic function.
+    (emit-walk-stack op argc (calc-offset argc) env)
+    (emit op "mov ~a(%esp), %eax" start-si)
+    (emit op "mov ~a(%eax), %eax" (- CLOS-TAG))
+    (emit op "mov $~a, %ecx" argc)
+    (emit op "sub $~a, %esp" (- (abs si) WORDSIZE))
+    (emit op "call *%eax")
+    (emit op "add $~a, %esp" (- (abs si) WORDSIZE))
+    (emit op "mov ~a(%esp), %ebp" (- WORDSIZE))
+    ))
+
+(define (emit-foreign-call op fn args si env)
+  (let* ((args (reverse args))
+         (argc (length args))
+         (calc-offset (lambda (i) (- si (* WORDSIZE i))))
+         (end-si (- si (* WORDSIZE (- argc 1)))))
+    (for-each
+      (lambda (offset arg)
+        (emit-expr op arg offset env)
+        (emit op "mov %eax, ~a(%esp)" offset))
+      (map calc-offset (iota argc))
+      args)
+    (emit op "sub $~a, %esp" (abs end-si))
+    (emit op "call ~a" fn)
+    (emit op "add $~a, %esp" (abs end-si))))
+
+(define (emit-tail-apply op fn es si env)
+  (emit-expr op fn si env)
+  (emit op "mov %eax, ~a(%esp)" si)
+  (emit-expr op es (- si WORDSIZE) env)
+  (emit op "mov %eax, ~a(%esp)"  (- (* 2 WORDSIZE)))
+  (emit op "mov ~a(%esp), %eax" si)
+  (emit op "mov %eax, ~a(%esp)" (- WORDSIZE))
+  (emit op "add $~a, %esp" WORDSIZE)
+  (emit op "jmp L_apply"))
+
+(define (emit-apply op fn es si env)
+  (emit op "movl $0, ~a(%esp)" si)
+  (emit op "movl $0, ~a(%esp)" (- si WORDSIZE))
+  (emit-expr op fn (- si (* 2 WORDSIZE)) env)
+  (emit op "mov %eax, ~a(%esp)" (- si (* 2 WORDSIZE)))
+  (emit-expr op es (- si (* 3 WORDSIZE)) env)
+  (emit op "mov %eax, ~a(%esp)" (- si (* 3 WORDSIZE)))
+  (emit op "mov %esp, ~a(%esp)" (- si WORDSIZE))
+  (emit op "sub $~a, %esp" (- (abs si) WORDSIZE))
+  (emit op "call L_apply")
+  (emit op "add $~a, %esp" (- (abs si) WORDSIZE))
+  (emit op "mov ~a(%esp), %ebp" (- WORDSIZE)))
+
+(define (emit-L-apply op)
+  (let ((loop (generate-label "unstack"))
+        (end (generate-label "call")))
+    (emit op "L_apply: ")
+    (emit op "mov ~a(%esp), %eax" (- (* 3 WORDSIZE)))
+    (emit op "lea ~a(%esp), %edi" (- (* 3 WORDSIZE)))
+    (emit op "mov $1, %ecx")
+    (emit op "~a: " loop)
+    (emit op "cmp $~a, %eax" NIL-TAG)
+    (emit op "je ~a" end)
+
+    (emit op "mov ~a(%eax), %edx" (- PAIR-TAG))
+    (emit op "mov %edx, (%edi)")
+
+    (emit op "mov ~a(%eax), %eax" (- WORDSIZE PAIR-TAG))
+    (emit op "sub $~a, %edi" WORDSIZE)
+    (emit op "add $1, %ecx")
+    (emit op "jmp ~a" loop)
+    (emit op "~a: " end)
+    (emit op "mov ~a(%esp), %eax" (- (* 2 WORDSIZE)))
+    (emit op "mov ~a(%eax), %eax" (- CLOS-TAG))
+    (emit op "jmp *%eax")
   ))
 
-(define (compile-apply f e si env)
-  (let* ([es (list f e)]
-         [args-n (length es)]
-         ; 2 bytes for ret-addr and old-ebp
-         [args-start (- si (* 2 wordsize))]
-         [offsets (map (lambda (i) (- args-start (* wordsize i)))
-                       (iota args-n))]
-         [eval-si (- args-start (* wordsize args-n))])
-    (initialize-offsets (append (list si (- si wordsize) args-start) offsets))
-    (for-each
-      (lambda (e offset)
-        (compile-expr e eval-si env)
-        (emit "movl %eax, ~a(%esp)" offset))
-      es
-      offsets)
+(define (emit-construct-vararg op argc si)
+  #;(
+      [z 1]
+      ()  0
+      (1) 1
 
-    (emit "subl $~a, %esp" (- (abs si) wordsize))
-    (emit "movl $~a, %ecx" args-n)
-    (emit "call L_apply")
-    (emit "addl $~a, %esp" (- (abs si) wordsize))
-    ))
-
-(define (compile-vararg-construct params-sz)
-  (let* ([loop (generate-label 'loop)]
-         [end (generate-label 'end)])
-    ; ebp - stack base pointer (invariant)
-    ; eax - scratch
-    ; ecx - argument size
-    ; edx - accumulate vararg
-    ; esp - stack pointer (but will be used as scratch here then restored)
-    
-    ;;; convert array to list
-    (emit "movl %ebp, %esp")
-    (emit "movl %ecx, %eax")
-    (emit "addl $1, %eax")
-    (emit "imull $~a, %eax" wordsize)
-    (emit "subl %eax, %esp")
-    
-    (emit "movl $~a, (%esp)" pair-tag)
-    (emit "addl $~a, %esp" wordsize)
-
-    (emit "~a: " loop)
-    (emit "cmpl $~a, %ecx" params-sz)
-    (emit "jl ~a" end)
-    
-    (emit "movl free_ptr, %edx")
-    (emit "addl $~a, (free_ptr)" (* 2 wordsize))
-    
-    (emit "movl ~a(%esp), %eax" (- wordsize))
-    (emit "movl %eax, ~a(%edx)" wordsize) ; store-cdr
-    (emit "movl (%esp), %eax")
-    (emit "movl %eax, (%edx)")            ; store-car
-
-    (emit "orl $~a, %edx" pair-tag)       ; tag pointer
-    (emit "movl %edx, (%esp)")
-
-    (emit "addl $~a, %esp" wordsize)
-    (emit "subl $1, %ecx")
-    (emit "jmp ~a" loop)
-    (emit "~a: " end)
-    (emit "movl %ebp, %esp")
-    ))
-
-(define (compile-code label free-vars params body variadic?)
-  (emit "~a: " label)
-  (emit "pushl %ebp")
-  (emit "movl %esp, %ebp")
-  (if variadic?
-      (compile-vararg-construct (length params)))
-  (compile-expr
-    (cons 'begin body)
-    (* (- wordsize) (add1 (length params)))
-    (append
-      (map (lambda (v i)
-            (cons v
-                  (string-append
-                    (format "movl -4(%ebp), %eax\n")
-                    (format "movl ~a(%eax), %eax" (- (* wordsize (+ 2 i)) closure-tag)))))
-           free-vars
-           (iota (length free-vars)))
-      (map (lambda (v i)
-            (cons v 
-                  (format "movl ~a(%ebp),%eax"
-                          (* (- wordsize) (add1 i)))))
-           params
-           (iota (length params)))))
-  (emit "popl %ebp")
-  (emit "ret"))
-
-(define (compile-labels datums bindings body)
-  (emit ".text")
-  (emit ".p2align 4,,15")
-  (emit "scheme_entry:")
-  ; handle incoming call from C
-  (emit "movl %ebp, (PREV_EBP)")
-  (emit "pushl %ebp")
-  (emit "movl %esp, %ebp")
-  (emit "movl %ebp, (TOP_EBP)")
-  (for-each
-    (lambda (lbl)
-      (compile-prim '(vector 0) -4 '())
-      (emit "movl %eax, ~a" lbl)
-      ;;; TODO: it is workaround to push global to CONSTANT pointer so GC can collect these
-      (emit "movl $~a, %eax" lbl)
-      (emit "movl CONSTANTS, %ecx")
-      (emit "movl %eax, (%ecx)")
-      (emit "addl $~a, (CONSTANTS)" wordsize))
-    datums)
-
-  (compile-expr
-    (cons 'begin body)
-    (- wordsize)
-    (append
-      (map (lambda (dat) (cons dat (format "movl ~a, %eax" dat))) datums)
-      (map (lambda (b) (list (car b)
-              (format "movl ~a, %eax" (car b))))
-           bindings)))
-  (emit "popl %ebp")
-  (emit "ret")
-  (let ()
-    (for-each (lambda (b)
-      (match (cadr b)
-        [(code ,variadic? ,free-vars ,params . ,body)
-         (guard (boolean? variadic?))
-         (compile-code (car b) free-vars params body variadic?)]
-        [,bb (error "compile-labels" "unknown" bb)]))
-      bindings))
-  (emit-L-apply))
-
-(define (compile-entry entry defns globals datums bindings body linker-out)
-  (emit ".extern L_apply")
-  (emit ".globl ~a" entry)
-  ; (for-each (lambda (dat) (emit ".extern ~a" dat)) datums)
-  
-  (for-each
-    (lambda (b)
-      (match (cadr b)
-        [(code ,variadic? ,free-vars ,params . ,body)
-          (guard (boolean? variadic?))
-          (compile-code (car b) free-vars params body variadic?)]
-        [,bb (error "compile-labels" "unknown" bb)]))
-    bindings)
-  (emit ".text")
-  (emit "~a: " entry)
-  ;;; copied from compile-code
-  (emit "pushl %ebp")
-  (emit "movl %esp, %ebp")
-  
-  (compile-expr
-    (cons 'begin body)
-    (- wordsize)
-    (append
-      (map (lambda (dat) (cons dat (format "movl ~a, %eax" dat))) datums)
-      (map (lambda (b) (list (car b)
-              (format "movl ~a, %eax" (car b))))
-           bindings)))
-  (emit "popl %ebp")
-  (emit "ret")
-
-  (pretty-print `(link-info ,entry ,defns ,globals ,datums) linker-out)
+      [(x y . z) 3]
+      (0)           1   err
+      (0 1)         2   (0 1 ())
+      (0 1 2)       3   (0 1 (2))
+      (0 1 2 3)     4   (0 1 (2 3))
+      (0 1 2 3 4)   5   (0 1 (2 3 4))
+      
+      example
+      inp         cons    argc  sz
+      (0 1 2 3 4) ()      5     3
+      (0 1 2 3)   (4)     4     3
+      (0 1 2)     (3 4)   3     3
+      (0 1)       (2 3 4) 2     3
   )
-
-(define (compile-lib program linker-out)
-  (match program
-    [(program ,entry ,defns ,globals (labels ,datums ,bindings (begin . ,es)))
-     (compile-entry entry defns globals datums bindings es linker-out)]
-    [,() 
-      (pretty-print program)
-      (error "compile-lib" "unknown program" program)]))
-
-(define (preprocess program)
-  (let* (
-         [program (desugar-top program)]
-         [program (reveal-function-top program)]
-         [program (convert-assignment program)]
-         [program (explicate-control-top program)]
-         )
-    program))
-
-(define (linking-files-to-exe! output-path . files)
-  (define (load-linker file)
-    (let* ([ip (open-input-file file)]
-           [ld (list (read ip))]
-           [ld (cons (read ip) ld)])
-      (close-input-port ip)
-      (reverse ld)))
-  (define get-obj-path car)
-  (define (get-entry lk) (cadr (cadr lk)))
-  (define (get-defns lk) (caddr (cadr lk)))
-  (define (get-globals lk) (cadddr (cadr lk)))
-  (define (get-datums lk) (car (cddddr (cadr lk))))
-  (define linkers (map load-linker files))
-  (for-each
-    (lambda (lk)
-      (match lk
-        [(,obj-path (link-info ,entry ,defns ,globals ,datums))
-         (guard (string? obj-path))
-         lk]
-        [,() (error "linking-files-to-exe!" "unknown linker" lk)]))
-    linkers)
-  (system "rm -f ./kompil.s")
-  (let ([entries (map get-entry linkers)]
-        [globals (fold-left set-union (make-set) (map get-globals linkers))]
-        [defns (fold-left set-union (make-set) (map get-defns linkers))]
-        [datums (fold-left set-union (make-set) (map get-datums linkers))]
-        [obj-paths (map get-obj-path linkers)]
-        [prev-emit emit]
-        [op (open-output-file "./kompil.s")])
-    (if (not (subset>=? globals defns))
-        (begin
-          (pretty-print (list 'set-diff  (set-diff globals defns)))
-          (error "linking-files-to-exe!" "missing dependecies")))
-    (set! emit  (lambda args (apply format (cons op args)) (newline op)))
-    (for-each (lambda (dat) (emit ".globl ~a" dat)) datums)
-    (if (not (null? datums))
-        (begin
-          (emit ".data")
-          (emit ".p2align 4,,15")
-          (for-each (lambda (d) (emit (format "~a: .byte 0,0,0,0" d))) datums)))
-    (emit ".globl scheme_entry")
-    (emit ".p2align 4,,15")
-    (emit ".text")
-    (emit-L-apply)
-    (emit "scheme_entry:")
-    ; handle incoming call from C
-    (emit "movl %ebp, (PREV_EBP)")
-    (emit "pushl %ebp")
-    (emit "movl %esp, %ebp")
-    (emit "movl %ebp, (TOP_EBP)")
+  (let ((loop (generate-label 'loop))
+        (cont-cons (generate-label 'conseq))
+        (end (generate-label 'end)))
     
+    (emit op "cmp $~a, %ecx" (sub1 argc))
+    (emit op "jge ~a" cont-cons)
+    (emit-foreign-call op 's_proc_arg_err '() si (make-env))
+    (emit op "~a: " cont-cons)
+
+    ;;;; counter
+    ;;; ecx is arg-length/ length
+    ;;; eax is accumulator
+    ;;; edx is source from stack
+    ;;;; temp
+    ;;; edi destination
+    (emit op "mov %ecx, %eax")
+    (emit op "imul $~a, %eax" WORDSIZE)
+    (emit op "mov %esp, %edx")
+    (emit op "sub %eax, %edx")
+    
+    (emit op "mov $~a, %eax" NIL-TAG)
+    
+    (emit op "~a:" loop)
+    (emit op "cmp $~a, %ecx" argc)
+    (emit op "jl ~a" end)
+
+    (emit op "mov free_ptr, %edi")
+    (emit op "addl $~a, (free_ptr)" (* 2 WORDSIZE))
+    
+    (emit op "mov %eax, ~a(%edi)" WORDSIZE)
+    (emit op "mov (%edx), %eax")
+    (emit op "mov %eax, (%edi)")
+    (emit op "or $~a, %edi" PAIR-TAG)
+    
+    (emit op "mov %edi, %eax")
+    (emit op "sub $1, %ecx")
+    (emit op "add $~a, %edx" WORDSIZE)
+    (emit op "jmp ~a" loop)
+    
+    (emit op "~a: " end)
+    (emit op "mov %eax, ~a(%edx)" (- WORDSIZE))))
+
+(define (emit-procedure op fn params variadic? fvs body)
+  (let* ((argc (length params))
+         (calc-offset
+          (lambda (i) (format "mov ~a(%esp), %eax" (* (- WORDSIZE) (+ i 1)))))
+         (calc-free-offset
+          (lambda (i)
+            (format "mov ~a(%ebp), %eax"
+                    (- (* WORDSIZE (+ i 2)) CLOS-TAG))))
+         (offsets (map calc-offset (iota argc)))
+         (env (extend-env params offsets (make-env)))
+         (env (extend-env fvs (map calc-free-offset (iota (length fvs))) env))
+         (si (* (- WORDSIZE) (+ argc 1))))
+    (emit op "~a: " fn)
+    (emit op "sub $~a, %esp" WORDSIZE)
+    (if (not variadic?)
+        (let ((end (generate-label 'conseq)))
+          (emit op "cmp $~a, %ecx" (length params))
+          (emit op "je ~a" end)
+          (emit-foreign-call op 's_proc_arg_err '() si env)
+          (emit op "~a: " end))
+        (emit-construct-vararg op argc si))
+    (emit op "mov ~a(%esp), %ebp" (- WORDSIZE))
+    (emit-seq op body si env)
+    (emit op "add $~a, %esp" WORDSIZE)
+    (emit op "ret")))
+
+(define (emit-variadic-procedure op fn fvs clauses)
+  (let* ((calc-free-offset
+          (lambda (i)
+            (format "mov ~a(%esp), %eax\nmov ~a(%eax), %eax"
+                    (- (* WORDSIZE 2)) (- (* WORDSIZE (+ i 2)) CLOS-TAG))))
+         (env (extend-env fvs (map calc-free-offset (iota (length fvs))) (make-env)))
+         (si (- (* 3 WORDSIZE))))
+    (emit op "~a: " fn)
     (for-each
-      (lambda (lbl)
-        (compile-prim '(vector 0) -4 '())
-        (emit "movl %eax, ~a" lbl)
-        ;;; TODO: it is workaround to push global to CONSTANT pointer so GC can collect these
-        (emit "movl $~a, %eax" lbl)
-        (emit "movl CONSTANTS, %ecx")
-        (emit "movl %eax, (%ecx)")
-        (emit "addl $~a, (CONSTANTS)" wordsize))
-      datums)
-    (for-each (lambda (entry) (emit "call ~a" entry)) entries)
-    (emit "popl %ebp")
-    (emit "ret")
+      (lambda (clause)
+        (match clause
+          ((,argc ,variadic? closure ,fn ,fvs)
+           (let ((next (generate-label "case_lambda_altern")))
+            
+            (if variadic?
+                (begin
+                  (emit op "cmp $~a, %ecx" (sub1 argc))
+                  (emit op "jl ~a" next))
+                (begin
+                  (emit op "cmp $~a, %ecx" argc)
+                  (emit op "jne ~a" next)))
+            (emit op "mov %ecx, %edx")
+            (emit-closure op fn fvs si env)
+            (emit op "mov %eax, ~a(%esp)" (- (* WORDSIZE 2)))
+            (emit op "mov %edx, %ecx")
+            (emit op "jmp ~a" fn)
+            (emit op "~a: " next)))
+          (,() (error "emit-variadic-procedure" "unknown clause" clause))))
+      clauses)
+    (emit-foreign-call op 's_proc_arg_err '() (- (* 2 WORDSIZE)) env)))
+
+(define (emit-closure op fn fvs si env)
+  (define fvs-count (length fvs))
+  (emit op "mov free_ptr, %ecx")
+  (emit op "addl $~a, (free_ptr)"
+            (align-to-multiple 8 (* WORDSIZE (+ 2 fvs-count))))
+  (emit op "mov $~a, %eax" fn)
+  (emit op "mov %eax, (%ecx)")
+  (emit op "movl $~a, ~a(%ecx)" (immediate-rep fvs-count) WORDSIZE)
+  (for-each
+    (lambda (fv i)
+      (emit op (apply-env fv env))
+      (emit op "mov %eax, ~a(%ecx)"
+              (* WORDSIZE (+ 2 i))))
+    fvs
+    (iota fvs-count))
+  (emit op "mov %ecx, %eax")
+  (emit op "or $~a, %eax" CLOS-TAG))
+
+(define (emit-expr op e si env)
+  (match e
+    (,()
+     (guard (immediate? e))
+     (emit op "mov $~a, %eax" (immediate-rep e)))
+    (,()
+     (guard (string? e))
+     (emit-str-lit op e si))
+    ('()
+     (emit op "mov $~a, %eax" (immediate-rep '())))
+    ((global ,lbl ,())
+     (emit op "mov ~a, %eax" lbl))
+    ((var ,x)
+     (emit op (apply-env x env)))
+    ((prim ,p)
+     (emit-prim op `(car (global ,(symbol->id-symbol p) ,p)) si env))
+    ((set-label! ,lbl ,e)
+     (emit-expr op e si env)
+     (emit op "mov %eax, ~a" lbl))
+    ((begin . ,es)
+     (emit-seq op es si env))
+    ((let ,bindings . ,body)
+     (emit-let op bindings body si env))
+    ((if ,pred ,conseq ,altern)
+     (emit-if op pred conseq altern si env))
+    ((closure ,fn ,fvs)
+     (emit-walk-stack op (+ 2 (length fvs)) si env)
+     (emit-closure op fn fvs si env))
+    ((prim-call . ,e)
+     (emit-prim op e si env))
+    ((call ,fn . ,es)
+     (emit-call op fn es si env))
+    ((foreign-call ,fn . ,es)
+     (emit-foreign-call op fn es si env))
+    ((tail-call ,fn . ,es)
+     (emit-tail-call op fn es si env))
+    ((tail-apply ,fn ,es)
+     (emit-tail-apply op fn es si env))
+    ((apply ,fn ,es)
+     (emit-apply op fn es si env))
+    (,() (error "emit-expr" "unmatch" e))))
+
+(define (emit-main op entry-name body env)
+  (emit op "~a:" entry-name)
+  (emit op "push %ebp")
+  (emit op "mov %esp, %ebp")
+  (emit-expr op body (- WORDSIZE) env)
+  (emit op "mov $0, %eax")
+  (emit op "pop %ebp")
+  (emit op "ret"))
+
+(define (emit-data op data)
+  (emit op ".section .data")
+  (for-each
+    (lambda (datum)
+     (match datum
+      (,x
+       (guard (symbol? x))
+       (emit op ".p2align 3")
+       (emit op "~a: .~abyte 0" x WORDSIZE))
+      (,() (error "emit-data" "unmatch" datum))))
+    data))
+
+(define (emit-code op entry-name prog)
+  (match prog
+    ((program (labels . ,labels) (data . ,data) (unbounds . ,unbounds) . ,body)
+     (let* ((mov-label-txt (lambda (l) (format "mov ~a, %eax" l)))
+            (datum-labels (set-union data unbounds))
+            (env (extend-env datum-labels
+                             (map mov-label-txt datum-labels)
+                             (make-env))))
+      (for-each (lambda (g) (emit op ".extern ~a" g)) datum-labels)
+      (emit op ".extern L_apply")
+      (emit op ".section .text")
+      (emit op ".globl ~a" entry-name)
+      (for-each
+        (lambda (label)
+          (match label
+            ((,name (code ,params ,variadic? ,fvs . ,es))
+             (emit-procedure op name params variadic? fvs es))
+            ((,name (case-code ,fvs . ,clauses))
+             (emit-variadic-procedure op name fvs clauses))
+            (,() (error "emit-code" "unmatch" label))))
+        labels)
+      (emit-main op entry-name (cons 'begin body) env)))
+    (,() (error "emit-code" "unmatch" prog))))
+
+(define (program->data prog)
+  (match prog
+    ((program (labels . ,()) (data . ,data) (unbounds . ,()) . ,()) data)
+    (,() (error "program->data" "unmatch" prog))))
+
+(define (emit-obj input-path output-path)
+  (define tmp-filename
+    (format "/tmp/scm-build/~a-~a.s"
+            (path-fileroot input-path)
+            (random-string 8)))
+  (system "mkdir -p /tmp/scm-build")
+  (system* "rm -f ~a" tmp-filename)
+  (let* ((prog
+          (preprocess
+            (list (lambda (path)
+                    (cons 'begin (read-sexps-from-path input-path)))
+                  uniquify-program
+                  lift-symbol-program
+                  convert-assignment-program
+                  explicate-program
+                  uncover-free-program
+                  reveal-function-program)
+            input-path))
+         (entry-name (format "~a.main" (string->id-string (path-fileroot input-path))))
+         (data (program->data prog))
+         (op (open-output-file tmp-filename)))
+    (emit-code op entry-name prog)
     (close-output-port op)
-    (set! emit prev-emit)
-    (system (format "gcc -fomit-frame-pointer -m32 -o ~a ./kompil.s ~a ./runtime.o" output-path
-            (fold-right (lambda (p ps) (string-append p " " ps)) "" obj-paths)))   
-    )
-  )
+    (system* "gcc -fomit-frame-pointer -m32 -c ~a -o ~a"
+             tmp-filename output-path)
+    (system* "rm -f ~a" tmp-filename)
+    (system* "objcopy --add-section .main_entry=<(echo ~s) ~a"
+             (format "~s" (list (list entry-name) data))
+             output-path)))
 
-(define (make-obj! program filename)
-  (system (format "rm -f ./~a.s ./~a.o ./~a.linker" filename filename filename))
-  (let ([op (open-output-file (format "./~a.s" filename))]
-        [linker-out (open-output-file (format "./~a.linker" filename))]
-        [prev-emit emit]
-        [program (preprocess program)])
-    (pretty-print (format "./~a.o" filename) linker-out)
-    (set! emit 
-          (lambda args (apply format (cons op args)) (newline op)))
-    (compile-lib program linker-out)
-    (close-output-port op)
-    (close-output-port linker-out)
-    (set! emit prev-emit)
-    (system (format "gcc -fomit-frame-pointer -m32 ./~a.s -c -g -o ./~a.o" filename filename))
-    (system (format "rm -f ./~a.s" filename))
-    ))
+(define (read-meta obj-filenames)
+  (define (read-meta obj-file)
+    (let* ((filename (format "/tmp/scm-build/~a.txt" (random-string 8)))
+           (_ (system* "objcopy --dump-section .main_entry=~a ~a"
+                       filename obj-file))
+           (inp (open-input-file filename))
+           (meta (read inp)))
+      (close-port inp)
+      meta))
+  (define metas (map read-meta obj-filenames))
+  (define entries (apply append (map car metas)))
+  (define globals (apply set-union (map cadr metas)))
+  (list entries globals))
 
-(define (compile-runtime)
-  (system "gcc -fomit-frame-pointer -m32 -c -g runtime.c -o runtime.o"))
+(define (emit-objs input-paths)
+ (system "mkdir -p /tmp/scm-build/")
+ (map
+    (lambda (i)
+      (if (equal? (path-extension i) "o")
+          i
+          (let ((out
+                 (format "/tmp/scm-build/~a-~a.o" (path-fileroot i) (random-string 8))))
+            (emit-obj i out)
+            out)))
+    input-paths))
 
-(if (not (file-exist? "./runtime.o"))
-    (compile-runtime))
+(define (combine-objs output-path . objs)
+  (define meta (read-meta objs))
+  (define entries (car meta))
+  (define globals (cadr meta))
+  (system* "gcc -m32 -r -o ~a ~a"
+           output-path
+           (apply string-append
+                  (map (lambda (s) (string-append " \"" s "\" ")) objs)))
+  (system* "objcopy --update-section .main_entry=<(echo ~s) ~a"
+           (format "~s" (list entries globals))
+           output-path))
 
-(define (compile-top-prog)
-  (define top-program
-    `(begin
-      ,@(read-sexps-from-path "primitives.scm")
-      ,@(read-sexps-from-path "top-program.scm")
-      ,@(read-sexps-from-path "scheme-libs.scm")
-      ,@(read-sexps-from-path "parser.scm")
-      ,@(read-sexps-from-path "parser-entry.scm")
-      ))
-  (make-obj! top-program "top-prog"))
+(define (linking-to-exe output-path . objs)
+  (define meta (read-meta objs))
+  (define entries (car meta))
+  (define globals (cadr meta))
+  (define tmp-filename
+    (format "/tmp/scm-build/~a-~a.s"
+            (path-fileroot output-path)
+            (random-string 8)))
+  (system* "rm -f ~a" tmp-filename)
+  (let* ((op (open-output-file tmp-filename)))
+    (emit-data op globals)
+    (emit op ".section .text")
+    (emit op ".globl main")
+    (emit op ".globl L_apply")
+    (for-each
+      (lambda (g) (emit op ".globl ~a" g))
+      globals)
+    (emit-L-apply op)
+    (emit op "main:")
+    (emit op "mov %esp, BOT_EBP")
+    (emit op "mov %esp, %ebp")
+    (emit op "mov ~a(%esp), %eax" (* WORDSIZE 2))
+    (emit op "mov %eax, ARGV")
+    (emit op "mov ~a(%esp), %eax" (* WORDSIZE 1))
+    (emit op "mov %eax, ARGC")
+    (emit op "call init_heap")
+    (for-each
+      (lambda (g)
+        (emit-expr op `(set-label! ,g (prim-call cons 0 '())) (- WORDSIZE) #f)
+        (emit op "mov $~a, %eax" g)
+        (emit op "mov GLOBALS, %ecx")
+        (emit op "mov %eax, (%ecx)")
+        (emit op "addl $~a, GLOBALS" WORDSIZE))
+      globals)
+    (for-each
+      (lambda (entry) (emit op "call ~a" entry))
+      entries)
+    (emit op "mov $0, %eax")
+    (emit op "ret")
+    (close-output-port op))
+  (system* "gcc -fomit-frame-pointer -m32 ~a ~a runtime.o -o ~a"
+           tmp-filename
+           (apply string-append
+                  (map (lambda (s) (string-append " \"" s "\" ")) objs))
+            output-path)
+  (system* "rm -f ~a" tmp-filename))
+
+(match (cdr (command-line))
+  (("--combine" ,output-path . ,input-paths)
+   (apply combine-objs (cons output-path (emit-objs input-paths))))
+  (("-o" ,output-path . ,input-paths)
+   (apply linking-to-exe (cons output-path (emit-objs input-paths))))
+  (("--make-prim-lib" ,output-path)
+   (write-primitive-lib output-path))
+  (,cmd-ln (error "emit" "unmatch" cmd-ln)))

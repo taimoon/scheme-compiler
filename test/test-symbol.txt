@@ -1,11 +1,8 @@
-something
+bad
+apple
 #t
 #f
-#t
-#f
-#t
-(something something)
-#t
-"something"
-something
-#t
+(1 2 3)
+x
+y
+(xyz moe reimu marisa 1 2 3 #t #f #\A #\a "something" "bad")

@@ -1,138 +1,137 @@
-(define tests (list
+(define (tests) (list
+  "test-lit"
   "test-unary"
-  "test-binary"
+  "test-binary-cmp"
+  "test-arithmetic"
   "test-let"
   "test-if"
-  "test-cons"
+  "test-logic-conn"
+  "test-cond"
+  "test-pair"
   "test-string"
   "test-vector"
-  "test-assignment"
-  "test-label"
+  "test-simple-procedure"
+  "test-simple-rec-proc"
+  "test-mutual-procedure"
+  "test-procedure-ref"
   "test-lambda"
-  "test-closure"
-  "test-clos-assign"
+  "test-lambda-1"
+  "test-tail-sum"
+  "test-tail-add"
+  "test-simple-set"
+  "test-free-var-set"
   "test-letrec"
-  "test-top-definition"
-  "test-variadic"
-  "test-quotation"
-  "test-primitive-proc"
-  "test-apply"
-))
-
-(define lib-tests (list
-  "test-ffi"
+  "test-named-let"
+  "test-simple-define"
+  '("test-lib-lib" "test-lib-driver")
+  '("test-lib-free-lib" "test-lib-free-driver")
   "test-symbol"
-  "test-top-lib"
-  "test-port"
-  "test-qq"
-  "test-match"
-  "test-reader"
-  "test-more-primitive"
-))
-
-(define gc-tests (list
+  test-ffi-io
+  "test-bitwise"
+  "test-vararg"
+  "test-apply"
+  "test-tail-apply"
+  "test-simple-gc-0"
   "test-simple-gc-1"
   "test-simple-gc-2"
   "test-simple-gc-3"
-  "test-simple-gc-4"
-  "test-simple-gc-5"
-))
+  "test-case-lambda-0"
+  "test-case-lambda-1"
+  "test-case-lambda-2"
+  test-command-line
+  "test-operand-prim"
+  "test-quasiquote"
+  "test-match"
+  "test-reader"
+  ))
 
-(define (run-a-test compile-file f)
-  (pretty-print (format "./test/~a.scm" f))
-  (compile-file (format "./test/~a.scm" f) "./a.out")
-  (system (format "./a.out > ./test/~a-out.txt" f))
-  (system (format "scheme --script ./test/~a.scm > ./test/~a.txt" f f))
-  (let ([res (system (format "diff ./test/~a-out.txt ./test/~a.txt" f f))])
+(define (system* cmd  . args)
+  (let* ((cmd (apply format (cons cmd args)))
+         (res (system cmd)))
     (if (eq? res 0)
-        (system (format "rm -f ./test/~a-out.txt" f))
-        (exit)))
-  )
-(define (test-parser)
-  (let ([f "test-parser"])
-    (pretty-print (format "./test/~a.scm" f))
-    (system (format "scheme --script ./test/~a.scm > ./test/~a-out.txt" f f))
-    (let ([res (system (format "diff ./test/~a-out.txt ./test/~a.txt" f f))])
-      (if (eq? res 0)
-          (system (format "rm -f ./test/~a-out.txt" f))
-          (exit)))))
+        #t
+        (exit res))))
 
-(define (test-cmd-ln compile-file)
-  (let ([f "test-cmd-ln"])
-    (pretty-print (format "./test/~a.scm" f))
-    (compile-file (format "./test/~a.scm" f) "./a.out")
-    (system (format "./a.out hakurei-reimu kirisame-marisa > ./test/~a-out.txt" f))
-    (system (format "scheme --script ./test/~a.scm hakurei-reimu kirisame-marisa > ./test/~a.txt" f f))
-    (let ([res (system "diff ./test/test-cmd-ln-out.txt ./test/test-cmd-ln.txt")])
-      (if (eq? res 0)
-          (system (format "rm -f ./test/~a-out.txt" f))
-          (exit)))
-    ))
+(define (last xs)
+  (cond
+    ((null? xs) xs)
+    ((and (pair? xs) (null? (cdr xs)))
+     (car xs))
+    (else (last (cdr xs)))))
 
-(define (test-proc-check compile-file)
-  (let ([f "test-proc-check"])
-    (pretty-print (format "./test/~a.scm" f))
-    (compile-file (format "./test/~a.scm" f) "./a.out")
-    (system (format "./a.out 1> ./test/~a-out.txt" f))
-    (system (format "./a.out 2>> ./test/~a-out.txt" f))
-    (system (format "scheme --script ./test/~a.scm 1> ./test/~a.txt" f f))
-    (system (format "scheme --script ./test/~a.scm 2>> ./test/~a.txt" f f))
-    (let ([res (system (format "diff ./test/~a-out.txt ./test/~a.txt" f f))])
-      (if (eq? res 0)
-          (system (format "rm -f ./test/~a-out.txt" f))
-          (exit)))))
+(define (run-multi-files compile . filenames)
+  (define inputs (map (lambda (f) (format "test/~a.scm" f)) filenames))
+  (define res-filename (last filenames))
+    (display (format "test/~a.scm\n" res-filename))
+  ;;; test -o option is working
+  (compile
+    (format "-o /tmp/scm-build/~a.out lib.o ~a" 
+            res-filename
+            (apply string-append
+                   (map (lambda (s) (string-append " \"" s "\" ")) inputs))))
+  (system* "git diff test/~a.txt <(/tmp/scm-build/~a.out)"
+           res-filename res-filename))
 
-(test-parser)
-(system "scheme --script compiler-entry.scm recompile-runtime")
+(define (run-a-file compile f)
+  (display (format "test/~a.scm\n" f))
+  (compile (format "-o /tmp/scm-build/~a.out lib.o test/~a.scm" f f))
+  (system* "git diff test/~a.txt <(/tmp/scm-build/~a.out)" f f))
 
-(define matryoshka 0)
-(let ([args (command-line-arguments)])
-  (if (pair? args)
-      (set! matryoshka (string->number (car args) 10))
-      #t))
+(define (test-ffi-io compile)
+  (display "test/test-ffi-io.scm\n")
+  (compile
+    "-o test/test-ffi-io.out lib.o test/test-ffi-io.scm")
+  (system* "diff test/test-ffi-io.scm <(test/test-ffi-io.out)")
+  (system* "diff test/test-ffi-io.scm test/test-ffi-io.txt"))
 
-(define (run-tests compile-file compile-file-w/o-lib gc-test?)
-  (let ([run-a-test* (lambda (f) (run-a-test compile-file f))]
-        [run-a-test** (lambda (f) (run-a-test compile-file-w/o-lib f))])
-    (for-each run-a-test** tests)
-    (run-a-test** "test-tail-call")
-    (for-each run-a-test* lib-tests)
-    ; (test-proc-check compile-file)
-    (if gc-test?
-        (begin
-          (for-each run-a-test* gc-tests)
-          (run-a-test* "test-auto-gc")))
-    (test-cmd-ln compile-file)))
+(define (test-command-line compile)
+  (define filename "test/test-command-line")
+  (display (format "~a.scm" filename)) (newline)
+  (compile
+    (format "-o ~a.out lib.o ~a.scm" filename filename))
+  (system* "diff ~a.txt <(./~a.out reimu marisa -19 2 3 5)" filename filename))
 
-(define (test-comp)
-  (system "scheme --script compiler-entry.scm recompile-top-prog")
-  (run-tests
-    (lambda (inp out)
-      (system (format "scheme --script compiler-entry.scm ~a ~a link-with-top-prog" inp out)))
-    (lambda (inp out)
-      (system (format "scheme --script compiler-entry.scm ~a ~a link-with-top-prog" inp out)))
-    #t))
+(define (compiler-0 cmd)
+  (system* "scheme --script compiler.so ~a" cmd))
 
-(define (run-matryoshka-test n)
-  (define compile-file
-    (if (<= n 0)
-        (lambda (inp out) (system (format "./compiler-~a.out ~a ~a link-with-top-prog" 0 inp out)))
-        (lambda (inp out) (system (format "./compiler-~a.out ~a ~a link-with-top-prog" n inp out)))))
-  (set! n (if (<= n 0) 0 n))
-  (display (format "=====test-compiler-~a=====\n" n))
-  (system (format "scheme --script make-compiler.scm ~a" n))
-  (system (format "./compiler-~a.out recompile-top-prog" n))
-  (run-tests compile-file compile-file #f))
+(define (compiler-1 cmd)
+  (system* "./compiler.out ~a" cmd))
 
-(system "rm -f compiler-*.out")
+(define (compiler-2 cmd)
+  (system* "./compiler-1.out ~a" cmd))
 
-(begin
-(if (or (= matryoshka -1) (= matryoshka 0))
-    (test-comp))
-(if (or (= matryoshka -1) (= matryoshka 1))
-    (run-matryoshka-test 0))
-(if (or (= matryoshka -1) (= matryoshka 2))
-    (run-matryoshka-test 1))
-(if (or (= matryoshka -1) (= matryoshka 3))
-    (run-matryoshka-test 2))
-)
+(define (run-all-tests compiler)
+  (display "====compiling library====\n")
+  (compiler "--make-prim-lib primitives.scm")
+  (compiler "--combine lib.o intern.scm kernel.scm primitives.scm lib/scheme-libs.scm lib/writer.scm lib/reader.scm")
+  (display "====done compiling library====\n")
+  (system* "mkdir -p /tmp/scm-build")
+  (for-each
+    (lambda (f)
+      (cond
+        ((pair? f) (apply run-multi-files (cons compiler f)))
+        ((procedure? f) (f compiler))
+        (else (run-a-file compiler f))))
+    (tests))
+  (system* "rm -f primitives.scm")
+  (system* "rm -f /tmp/scm-build/*")
+  (system* "rm -f test/*.out"))
+
+(display "====compiler.so====\n")
+(system* "scheme --script make-compiler.scm")
+(run-all-tests (lambda (cmd) (system (format "scheme --script compiler.so ~a" cmd))))
+
+(display "====compiler.out====\n")
+(system* "scheme --script make-compiler.scm \"scheme --script compiler.so ~~a\" compiler.out")
+(display "====done bootstrap compiler.out from compiler.so====\n")
+(run-all-tests (lambda (cmd) (system (format "./compiler.out ~a" cmd))))
+
+(display "====compiler-1.out====\n")
+(system* "scheme --script make-compiler.scm \"./compiler.out ~~a\" compiler-1.out")
+(display "====done bootstrap compiler-1.out from compiler.out====\n")
+(run-all-tests (lambda (cmd) (system (format "./compiler-1.out ~a" cmd))))
+
+(display "====compiler-2.out====\n")
+(system* "scheme --script make-compiler.scm \"./compiler-1.out ~~a\" compiler-2.out")
+(display "====done bootstrap compiler-2.out from compiler-1.out====\n")
+(run-all-tests (lambda (cmd) (system (format "./compiler-2.out ~a" cmd))))

@@ -1,68 +1,56 @@
-(load "compiler.scm")
+(write (make-vector 0))
+(newline)
 
-(pretty-print
-  (vector? (make-vector 0))
-)
+(write (vector? (make-vector 0)))
+(newline)
 
-(pretty-print
-  (let ([xs (make-vector 3)])
-    (vector-set! xs 0 17)
-    (vector-set! xs 1 23)
-    (vector-set! xs 2 29)
-    xs)
-)
+(write (make-vector 3))
+(newline)
 
-(pretty-print
-  (let ([xs (make-vector 3)])
-    (vector-set! xs 0 #t)
-    (vector-set! xs 1 #\c)
-    (vector-set! xs 2 "vector")
-    xs)
-)
+(write (vector-length (make-vector 3)))
+(newline)
 
-(pretty-print
-  (vector-length (make-vector 3))
-)
+(write (vector -1 0 1 #t #f #\t #\f))
+(newline)
 
-(pretty-print
-  (let ([xs (make-vector 3)])
-    (vector-set! xs 2 29)
-    (vector-ref xs 2))
-)
+(write #(-1 0 1 #t #f #\t #\f))
+(newline)
 
-(pretty-print
-  (let ([xs (make-vector 3)])
-    (vector-set! xs 0 2)
-    (vector-set! xs 1 (vector-length xs))
-    (vector-set! xs 2 (+ (vector-ref xs 0) (vector-ref xs 1)))
-    xs
-    )
-)
+(let ((xs (make-vector 3)))
+  (vector-set! xs 0 17)
+  (vector-set! xs 1 23)
+  (vector-set! xs 2 29)
+  (write xs)
+  (newline)
+  (write (vector-length xs))
+  (newline)
+  (write (vector? xs))
+  (newline))
 
-(pretty-print
-  (vector-length (vector 1 2 3))
-)
+(let ((xs (vector #t #\c "vector")))
+  (write xs)
+  (newline)
+  (write (vector-length xs))
+  (newline)
+  (write (vector? xs))
+  (newline))
 
-(pretty-print
-  (vector 1 2 3)
-)
+(let ((xs (make-vector 3)))
+  (vector-set! xs 2 29)
+  (write (vector-ref xs 2))
+  (newline)
+  (write (vector-length xs))
+  (newline)
+  (write (vector? xs))
+  (newline))
 
-(pretty-print
-  (vector (vector (vector #t) #\t) (vector (list 1 2 3) "compiler"))
-)
-
-(pretty-print
-  (let ([xs (vector 0 0 0)])
-    (vector-set! xs 0 2)
-    (vector-set! xs 1 (vector-length xs))
-    (vector-set! xs 2 (+ (vector-ref xs 0) (vector-ref xs 1)))
-    xs)
-)
-
-(pretty-print
-  (let ([xs (make-vector (if #t 3 4))])
-    (vector-set! xs 0 2)
-    (vector-set! xs 1 (vector-length xs))
-    (vector-set! xs 2 (+ (vector-ref xs 0) (vector-ref xs 1)))
-    xs)
-)
+(let ((xs (make-vector 3)))
+  (vector-set! xs 0 2)
+  (vector-set! xs 1 (vector-length xs))
+  (vector-set! xs 2 (+ (vector-ref xs 0) (vector-ref xs 1)))
+  (write xs)
+  (newline)
+  (write (vector-length xs))
+  (newline)
+  (write (vector? xs))
+  (newline))

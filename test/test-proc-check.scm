@@ -1,5 +1,0 @@
-(let ([tmp 0])
-  (set! tmp (lambda (x) (* x x)))
-  (pretty-print (tmp 2))
-  (set! tmp '())
-  (tmp 2))

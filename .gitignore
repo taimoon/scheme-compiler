@@ -2,3 +2,4 @@
 *.o
 kompil.s
 .vscode
+*.so

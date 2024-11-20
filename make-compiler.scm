@@ -1,50 +1,53 @@
-(load "utils.scm")
-(load "match.scm")
+(import (match))
+(let ()
+(define (make-compiler-from-chez)
+  (define (string-split s sep)
+    (let recur ((i 0) (j 0))
+      (cond
+        ((>= i (string-length s))
+        (list (substring s j i)))
+        ((eq? (string-ref s i) sep)
+        (cons (substring s j i)
+              (recur (add1 i) (add1 i))))
+        (else (recur (add1 i) j)))))
+  (system "gcc -fno-omit-frame-pointer -m32 runtime.c -c -o runtime.o")
 
-(define (make-compiler* compiler-entry compiler-output-path)
-  (define files (list
-    "primitives"
-    "top-program"
-    "scheme-libs"
-    "parser"
-    "parser-entry"
-    "utils"
-    "match"
-    "preprocessor"
-    "compiler"
-    "compiler-entry"))
-  (for-each
-    (lambda (f)
-      (compiler-entry (format "-o ~a ~a.scm" f f)))
-    files)
-  (compiler-entry "recompile-top-prog")
-  (compiler-entry "recompile-runtime")
-  (compiler-entry
-    (format "-link ~a ~a" compiler-output-path
-      (fold-right (lambda (p ps) (string-append p " " ps))
-                  ""
-                  (map (lambda (f) (format "~a.linker" f)) files))))
-  (for-each (lambda (f) (system (format "rm -f ~a.s ~a.o ~a.linker" f f f))) files)
+  (system "rm -f compiler.so")
+  (system (format #f "cp -rf -T lib/ build/"))
+  (system (format #f "cp front.sls front.scm build/"))
+  (system (format #f "cp compiler.scm build/"))
+
+  (current-directory "build/")
+  (make-boot-file "compiler.so"
+    '("scheme" "petite")
+    "set.sls"
+    "match.sls"
+    "utils.sls"
+    "front.sls"
+    "compiler.scm")
+  (system "mv compiler.so ../")
+  (current-directory "..")
+  (system "rm -rf build/")
   )
 
-(define (meta-compiler-name x)
-  (if (< x 0)
-      (error "meta-compiler-name" "expect exact nonnegative integer" x)
-      (format "compiler-~a.out" x)))
+(define (make-meta-compiler compile out)
+  (for-each
+    compile
+    (list
+      ;;;; NOTE: not required if precompiled during testing
+      ; "--make-prim-lib primitives.scm"
+      ; "--combine lib.o kernel.scm primitives.scm lib/scheme-libs.scm lib/writer.scm lib/reader.scm"
+      "--combine cplib.o lib/match-defmacro.scm lib/set.scm lib/utils.scm"
+      "--combine front.o front.scm"
+      "--combine compiler.o compiler.scm"
+      (format "-o ~a lib.o cplib.o front.o compiler.o" out)))
+  (system "rm -f cplib.o front.o compiler.o")
+  )
 
-(define (make-n-compiler n)
-  (cond [(file-exist? (meta-compiler-name n)) #t]
-        [(<= n 0)
-         (make-compiler*
-          (lambda (args-str) (system (format "scheme --script compiler-entry.scm ~a" args-str)))
-          (meta-compiler-name 0))]
-        [else
-          (make-n-compiler (sub1 n))
-          (make-compiler*
-            (lambda (args-str) (system (format "./~a ~a" (meta-compiler-name (sub1 n)) args-str)))
-            (meta-compiler-name n))]
-      ))
-
-(match (command-line-arguments)
-  [(,n)
-   (make-n-compiler (string->number n 10))])
+(match (cdr (command-line))
+  ((,compiler ,out)
+    (make-meta-compiler
+      (lambda (cmd) (system (format compiler cmd)))
+      out))
+  (,() (make-compiler-from-chez)))
+)

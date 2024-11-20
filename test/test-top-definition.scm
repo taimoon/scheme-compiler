@@ -1,5 +1,0 @@
-(define (even x)
-  (if (eq? x 0) #t (odd (sub1 x))))
-(define (odd x)
-  (if (eq? x 0) #f (even (sub1 x))))
-(pretty-print (and (even 2) (odd 3) (odd 5)))

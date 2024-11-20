@@ -1,6 +1,0 @@
-("utils.scm" . #t)
-("parser.scm" . #t)
-("top-program.scm" . #t)
-("match.scm" . #t)
-("preprocessor.scm" . #t)
-("scheme-libs.scm" . #t)

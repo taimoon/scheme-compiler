@@ -1,8 +1,8 @@
-(pretty-print (if (and (integer? 0) (zero? 0)) #\0 #\1))
-(pretty-print (if (and (integer? #\0) (zero? #\0)) #\0 #\1))
-(pretty-print (if (< -2 -3) #\L #\s))
-(pretty-print (if (<= -3 -2) #\L #\s))
-(pretty-print
-  (cond [(eq? #\t #t) 6]
-         [(eq? #f #\f) 4]
-         [else 7]))
+(write (if (integer? 0) #\0 #\1))
+(newline)
+(write (if (integer? #\0) #\0 #\1))
+(newline)
+(write (if (< -2 -3) #\L #\s))
+(newline)
+(write (if (<= -3 -2) #\L #\s))
+(newline)
