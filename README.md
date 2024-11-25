@@ -28,8 +28,26 @@ I've made the tail apply work properly. In addition, I add primitive case lambda
   - if you want to run the test
   - if you want to use scheme implementation other than the `compiler.out`
 
+# How to run in docker
+
+For non linux users, you may install docker for your OS,
+then proceed to do development in docker environment.
+
+Naively, think of `dockerfile` is a program of installation instruction for `docker` to make a `image`.
+Once the image is built by `docker`, you may ask `docker` to load and run the `image`.
+One of the option is to attach a terminal session after `docker` loading the `image`.
+The terminal session is your linux dev environment.
+
+```bash
+docker build -t fedora-chez-scheme .
+docker run -it -v $(pwd):/home/scheme-compiler fedora-chez-scheme
+# now you have a simple linux dev environment
+# may proceed to `How to compile`
+```
+
 # How to compile
 ```bash
+source activate.sh
 # run these 2 lines to precompile the library
 ./compiler.out --make-prim-lib primitives.scm
 ./compiler.out --combine lib.o \
