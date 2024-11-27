@@ -48,6 +48,7 @@ docker run -it -v $(pwd):/home/scheme-compiler fedora-chez-scheme
 # How to compile
 ```bash
 source activate.sh
+gcc -fno-omit-frame-pointer -m32 runtime.c -c -o runtime.o
 # run these 2 lines to precompile the library
 ./compiler.out --make-prim-lib primitives.scm
 ./compiler.out --combine lib.o \

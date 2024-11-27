@@ -31,17 +31,17 @@
   )
 
 (define (make-meta-compiler compile out)
+  (system "gcc -fno-omit-frame-pointer -m32 runtime.c -c -o runtime.o")
   (for-each
     compile
     (list
-      ;;;; NOTE: not required if precompiled during testing
-      ; "--make-prim-lib primitives.scm"
-      ; "--combine lib.o kernel.scm primitives.scm lib/scheme-libs.scm lib/writer.scm lib/reader.scm"
+      "--make-prim-lib primitives.scm"
+      "--combine lib.o intern.scm kernel.scm primitives.scm lib/scheme-libs.scm lib/writer.scm lib/reader.scm"
       "--combine cplib.o lib/match-defmacro.scm lib/set.scm lib/utils.scm"
       "--combine front.o front.scm"
       "--combine compiler.o compiler.scm"
       (format "-o ~a lib.o cplib.o front.o compiler.o" out)))
-  (system "rm -f cplib.o front.o compiler.o")
+  (system "rm -f cplib.o front.o compiler.o primitives.scm")
   )
 
 (match (cdr (command-line))
