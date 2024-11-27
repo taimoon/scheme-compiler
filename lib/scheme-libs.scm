@@ -364,6 +364,9 @@
            (error "format" "too few control string"))
        (apply string-append (reverse (cons (substring s j (string-length s)) acm)))]
       [(and (eq? (maybe-ref s i) #\~)
+            (eq? (maybe-ref s (+ i 1)) #\~))
+        (loop s (+ i 2) (+ i 2) args (cons "~" (cons (substring s j i) acm)))]
+      [(and (eq? (maybe-ref s i) #\~)
             (eq? (maybe-ref s (+ i 1)) #\a))
         (if (not (pair? args))
             (error "format" "too many control string"))
