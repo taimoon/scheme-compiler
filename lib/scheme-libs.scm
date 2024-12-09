@@ -223,7 +223,8 @@
   (and (char<=? #\0 c)
        (char<=? c #\9)))
 (define char-whitespace?
-  (let ((whitespaces '(#\space #\newline #\return #\linefeed #\tab)))
+  ; #\space #\newline #\return #\linefeed #\tab
+  (let ((whitespaces (map integer->char '(32 10 13 10 9))))
     (lambda (c) (if (memq c whitespaces) #t #f))))
 
 ;;; string
