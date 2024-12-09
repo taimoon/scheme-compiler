@@ -126,7 +126,7 @@
    (format #t "===done bootstrapping===\n")
    (run-all-tests (lambda (cmd) (system (format comp-cmd cmd)))))
   ((,comp-cmd)
-   (format #t "===~a===" comp-cmd)
+   (format #t "===~a===\n" comp-cmd)
    (run-all-tests (lambda (cmd) (system (format comp-cmd cmd)))))
   (,cmd-ln
    (format #t "unknown argument, procceed to default\n")
