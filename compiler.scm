@@ -958,4 +958,4 @@ closure
    (apply linking-to-exe (cons output-path (emit-objs input-paths))))
   (("--make-prim-lib" ,output-path)
    (write-primitive-lib output-path))
-  (,cmd-ln (error "emit" "unmatch" cmd-ln)))
+  (,cmd-ln (error "compiler.scm" "unmatch" cmd-ln)))

@@ -1,24 +1,24 @@
 (define %r6rs-named-characters
   (list
-    (list #\nul "nul" 0)
-    (list #\alarm "alarm" 7)
-    (list #\backspace "backspace" 8)
-    (list #\tab "tab" 9)
-    (list #\linefeed "linefeed" 10)
-    (list #\newline "newline" 10)
-    (list #\vtab "vtab" 11)
-    (list #\page "page" 12)
-    (list #\return "return" 13)
-    (list #\esc "esc" 27)
-    (list #\space "space" 32)
-    (list #\delete "delete" 127)))
+    (list (integer->char 0) "nul")
+    (list (integer->char 7) "alarm")
+    (list (integer->char 8) "backspace")
+    (list (integer->char 9) "tab")
+    (list (integer->char 10) "linefeed")
+    (list (integer->char 10) "newline")
+    (list (integer->char 11) "vtab")
+    (list (integer->char 12) "page")
+    (list (integer->char 13) "return")
+    (list (integer->char 27) "esc")
+    (list (integer->char 32) "space")
+    (list (integer->char 127) "delete")))
 
 (define %escaped-string-element
   (list
     (list #\\ "\\\\")
     (list #\" "\\\"")
-    (list #\tab "\\t")
-    (list #\newline "\\n")))
+    (list (integer->char 9) "\\t")
+    (list (integer->char 10) "\\n")))
 
 (define (string-repr s)
   (define (char->string-repr ch)

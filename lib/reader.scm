@@ -41,19 +41,19 @@
       [(left-paren? c) (list 'left-paren)]
       [(right-paren? c) (list 'right-paren)]
       [(char-whitespace? c) (%next-token p)]
-      [else (error %next-token 'unknown:lexeme c)])))
+      [else (error '%next-token 'unknown:lexeme c)])))
 
 (define (read-quote-delimited-string p)
   (define %escaped-string-element
     (list
       (list #\" #\")
-      (list #\a #\alarm)
-      (list #\b #\backspace)
-      (list #\t #\tab)
-      (list #\n #\linefeed)
-      (list #\v #\vtab)
-      (list #\f #\page)
-      (list #\r #\return)
+      (list #\a (integer->char 7))  ; #\alarm
+      (list #\b (integer->char 8))  ; #\backspace
+      (list #\t (integer->char 9))  ; #\tab
+      (list #\n (integer->char 10)) ; #\linefeed
+      (list #\v (integer->char 11)) ; #\vtab
+      (list #\f (integer->char 12)) ; #\page
+      (list #\r (integer->char 13)) ; #\return
       (list #\\ #\\)
     ))
   (let loop ([i 0] [c (read-char p)])
@@ -75,7 +75,8 @@
 
 (define (read-comment p)
   (let loop ([c (read-char p)])
-    (if (or (eof-object? c) (eq? c #\newline))
+    ; #\newline 10
+    (if (or (eof-object? c) (eq? c (integer->char 10)))
         (%next-token p)
         (loop (read-char p)))))
 
@@ -109,20 +110,20 @@
       [else (error 'read-hash-prefixed 'unknown:lexeme c)])))
 
 (define %name-characters
-  (map (lambda (b) (append (string->list (car b)) (list (cadr b))))
+  (map (lambda (b) (append (string->list (car b)) (list (integer->char (cadr b)))))
     '(
-      ("alarm" #\alarm)
-      ("backspace" #\backspace)
-      ("tab" #\tab)
-      ("space" #\space)
-      ("newline" #\newline)
-      ("linefeed" #\linefeed)
-      ("vtab" #\vtab)
-      ("page" #\page)
-      ("return" #\return)
-      ("nul" #\nul)
-      ("esc" #\esc)
-      ("delete" #\delete)
+      ("alarm" 7)
+      ("backspace" 8)
+      ("tab" 9)
+      ("space" 32)
+      ("newline" 10)
+      ("linefeed" 10)
+      ("vtab" 11)
+      ("page" 12)
+      ("return" 13)
+      ("nul" 0)
+      ("esc" 27)
+      ("delete" 127)
     )))
 
 (define (naive-lookahead-match x xss peek next)
