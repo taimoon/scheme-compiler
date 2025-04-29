@@ -253,5 +253,7 @@
        (list->vector (parse-list tk))]
       [else (error "parse" "parse-error" v)])))
 
-(define (read port)
-  (parse (tokenizer port)))
+(define read
+  (case-lambda
+    (() (read (current-input-port)))
+    ((port) (parse (tokenizer port)))))

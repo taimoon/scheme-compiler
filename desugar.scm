@@ -47,6 +47,12 @@
 
 ;; sugars
 (define uniquify-program (let ()
+
+(define (intro-name e k)
+  (let ((tmp (generate-label "v")))
+    `(let ((,tmp ,e))
+      ,(k tmp))))
+
 (define keywords
   '(begin let if
     let*
@@ -54,7 +60,8 @@
     lambda letrec case-lambda
     set! foreign-call prim-call
     quote quasiquote unquote unquote-splicing
-    match import include))
+    match import include
+    ))
 
 (define (init-uenv)
   (define (make-prim p)
@@ -222,24 +229,56 @@
          (list (uniquify `(letrec ,(map definition->binding defns) . ,es) env add-global!)))
         (else (uniquify-each es env add-global!))))))
 
-(define (uniquify-lambda params body env add-global!)
+(define (uniquify-lambda name params body env add-global!)
   (let* ((variadic? (improper-list? params))
          (params (improper->proper params))
          (params* (map generate-label params))
          (env (extend-env params params* env))
-         (fn (generate-label "fn")))
+         (fn (generate-label name)))
    `(lambda ,params* ,variadic? ,fn ,(make-begin (uniquify-seq body env add-global!)))))
 
-(define (uniquify-case-lambda clauses env add-global!)
-  `(case-lambda ,(generate-label "fn")
+(define (uniquify-case-lambda name clauses env add-global!)
+  `(case-lambda ,(generate-label name)
       .
-      ,(map (lambda (c) (uniquify-lambda (car c) (cdr c) env add-global!)) clauses)))
+      ,(map (lambda (i c)
+              (uniquify-lambda (format "~a_~a" name i) (car c) (cdr c)
+                               env
+                               add-global!))
+            (iota (length clauses))
+            clauses)))
 
 (define (make-prim-call pr . es)
   `(call (prim ,pr) . ,es))
 
 (define (make-prim-call* pr es)
   `(call (prim ,pr) . ,es))
+
+(define (checked-make-vector uniquify es env)
+  (define (insert-check sz)
+    `(if ,(make-prim-call 'integer? sz)
+         ,(make-prim-call 'make-vector sz)
+         (foreign-call s_make_vector_size_err ,sz)))
+  (match es
+    ((,sz)
+     (intro-name (uniquify sz env)
+                 (lambda (sz) (insert-check sz))))
+    (,es
+     (error "uniquify" "make-vector:unknown-args" es))))
+
+(define (checked-make-string uniquify es env)
+  (define (insert-check sz ch)
+    `(if ,(make-prim-call 'integer? sz)
+         ,(make-prim-call 'make-string sz ch)
+         (foreign-call s_make_string_size_err ,sz)))
+  (match es
+    ((,sz)
+     (intro-name (uniquify sz env)
+                 (lambda (sz) (insert-check sz #\nul))))
+    ((,sz ,ch)
+      (intro-name (uniquify sz env)
+                  (lambda (sz) (insert-check sz (uniquify ch env)))))
+    (,es
+      (error "uniquify" "make-string:unknown-args" es))))
 
 (define (uniquify e env add-global!)
 (let uniquify ((e e) (env env))
@@ -279,13 +318,9 @@
             ((prim list*)
              (uniquify (list*->cons es) env))
             ((prim make-string)
-             (match es
-              ((,sz)
-               (make-prim-call 'make-string (uniquify sz env) #\nul))
-              ((,sz ,ch)
-               (make-prim-call 'make-string (uniquify sz env) (uniquify ch env)))
-              (,es
-               (error "uniquify" "make-string:unknown-args" es))))
+             (checked-make-string uniquify es env))
+            ((prim make-vector)
+             (checked-make-vector uniquify es env))
             ((prim ,p)
              (make-prim-call* p (uniquify-each es env add-global!)))
             (,op
@@ -297,6 +332,10 @@
        (make-prim-call '+ (uniquify (car es) env) 1))
       (sub1
        (make-prim-call '- (uniquify (car es) env) 1))
+      (make-vector
+       (checked-make-vector uniquify es env))
+      (make-string
+       (checked-make-string uniquify es env))
       (,()
        (make-prim-call* p (uniquify-each es env add-global!)))))
     ((quote ,e*)
@@ -341,7 +380,7 @@
      (let* ((xs (map car bs))
             (xs* (map generate-label (map car bs)))
             (inner-env (extend-env xs xs* env))
-            (inits (uniquify-each (map cadr bs) env add-global!)))
+            (inits (uniquify-each-with-name xs (map cadr bs) env add-global!)))
       `(let ,(map list xs* inits)
             ,(make-begin (uniquify-seq es inner-env add-global!)))))
     ((let* ,bs . ,es)
@@ -352,13 +391,13 @@
      (let* ((xs (map car bs))
             (xs* (map generate-label (map car bs)))
             (env (extend-env xs xs* env))
-            (inits (map (lambda (b) (uniquify (cadr b) env)) bs))
+            (inits (uniquify-each-with-name xs (map cadr bs) env add-global!))
             (es (uniquify-seq es env add-global!)))
         `(letrec ,(map list xs* inits) ,(make-begin es))))
     ((lambda ,params . ,body)
-     (uniquify-lambda params body env add-global!))
+     (uniquify-lambda "lmb" params body env add-global!))
     ((case-lambda . ,clauses)
-     (uniquify-case-lambda clauses env add-global!))
+     (uniquify-case-lambda "clmb" clauses env add-global!))
     ((set! ,x ,e)
      (define e* (uniquify e env))
      (match (maybe-apply-env x env)
@@ -406,6 +445,18 @@
               (lambda (defns es) (cont defns (cons e es))))))
       (cont '() '())))
 
+(define (uniquify-each-with-name vars vals env add-global!)
+  (map (lambda (var val) (uniquify-with-name var val env add-global!)) vars vals))
+
+(define (uniquify-with-name var val env add-global!)
+  (match val
+    ((lambda ,params . ,es)
+     (uniquify-lambda (symbol->id-symbol var) params es env add-global!))
+    ((case-lambda . ,clauses)
+     (uniquify-case-lambda (symbol->id-symbol var) clauses env add-global!))
+    (,()
+     (uniquify val env add-global!))))
+
 (define (uniquify-program prog)
   (match prog
     ((begin . ,es)
@@ -419,8 +470,8 @@
                (unbounds (make-set))
                (bounds (make-set))
                (add-global!
-                (lambda (ref? lbl)
-                  (if ref?
+                (lambda (init? lbl)
+                  (if init?
                       (set! bounds (set-union bounds (make-set lbl)))
                       (set! unbounds (set-union unbounds (make-set lbl))))))
                (vals* (uniquify-each vals env add-global!))

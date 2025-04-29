@@ -8,6 +8,14 @@
   '("scheme" "petite")
   "lib/lib.so"
   "desugar.sls"
+  "tmp-alloc.sls"
   "front.sls"
   "compiler.scm")
+(make-boot-file "compiler-x86_64.so"
+  '("scheme" "petite")
+  "lib/lib.so"
+  "desugar.sls"
+  "tmp-alloc.sls"
+  "front.sls"
+  "compiler-x86_64.scm")
 (system "rm -f lib/*.so")

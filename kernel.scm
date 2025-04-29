@@ -56,6 +56,10 @@
   (let ((p (make-port (foreign-call s_stderr))))
     (lambda () p)))
 
+(define current-input-port
+  (let ((p (make-port (foreign-call s_stdin))))
+    (lambda () p)))
+
 (define (read-char ip)
   (let ((res (foreign-call s_read_char (%port ip))))
     (if (eq? res -1)
@@ -72,13 +76,13 @@
 
 (define write-char
   (case-lambda
-    ((ch) (foreign-call s_write_char ch (%port (current-output-port))))
-    ((ch op) (foreign-call s_write_char ch (%port op)))))
+    ((ch) (foreign-call s_fwrite_char ch (%port (current-output-port))))
+    ((ch op) (foreign-call s_fwrite_char ch (%port op)))))
 
 (define %ffi-c-write
   (case-lambda
-    ((x) (foreign-call s_write x (%port (current-output-port))))
-    ((x op) (foreign-call s_write x (%port op)))))
+    ((x) (foreign-call s_fwrite x (%port (current-output-port))))
+    ((x op) (foreign-call s_fwrite x (%port op)))))
 
 (define newline
   (case-lambda

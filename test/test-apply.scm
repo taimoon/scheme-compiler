@@ -22,8 +22,8 @@
 
 (let ()
   (define (%apply f xs) (apply f xs))
-  (writeln (%apply (lambda (x y) (+ x y)) (list 2 3)))
-  (writeln (%apply + (list 2 3)))
-  (writeln (%apply (lambda (f vs) (%apply f vs)) (list + (list 2 3))))
-  (writeln (%apply %apply (list %apply (list + (list 2 3)))))
+  (write-line (%apply (lambda (x y) (+ x y)) (list 2 3)))
+  (write-line (%apply + (list 2 3)))
+  (write-line (%apply (lambda (f vs) (%apply f vs)) (list + (list 2 3))))
+  (write-line (%apply %apply (list %apply (list + (list 2 3)))))
 )

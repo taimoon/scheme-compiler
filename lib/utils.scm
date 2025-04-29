@@ -34,19 +34,47 @@
         (cadr res)
         (error "apply-env" "unbound" x (map car env)))))
 
-(define (partition-k pred xs k)
-  (let recur ((xs xs) (k k))
-    (cond
-      ((not (pair? xs))
-       (k '() '()))
-      ((pred (car xs))
-       (recur (cdr xs)
-              (lambda (ts fs) (k (cons (car xs) ts)
-                                 fs))))
-      (else
-       (recur (cdr xs)
-              (lambda (ts fs) (k ts
-                                 (cons (car xs) fs))))))))
+(define partition (let ()
+  (define (partition-k pred xs k)
+    (if (null? xs)
+        (k '() '())
+        (let ()
+          (define (k* l r)
+            (if (pred (car xs))
+                (k (cons (car xs) l) r)
+                (k l (cons (car xs) r))))
+          (partition-k pred (cdr xs) k*))))
+  (case-lambda
+    ((pred xs) (partition-k pred xs list))
+    ((pred xs k) (partition-k pred xs k)))))
+
+(define lsort
+  (case-lambda
+    ((xs) (lsort xs <=))
+    ((xs cmp)
+     (let recur ((xs xs))
+      (cond
+        ((not (pair? xs)) '())
+        ((not (pair? (cdr xs))) xs)
+        ((not (pair? (cddr xs)))
+         (if (cmp (car xs) (cadr xs))
+             xs
+             (list (cadr xs) (car xs))))
+        (else
+         (let ((pvt (car xs)))
+          (partition (lambda (x) (cmp x pvt))
+            (cdr xs)
+            (lambda (ss bs)
+              (append (recur ss) (list pvt) (recur bs)))))))))))
+
+(define (zip-k xs ys k)
+  ;;; condition: (<= (length xs) (length ys))
+  (if (pair? xs)
+      (zip-k (cdr xs) (cdr ys)
+        (lambda (xs* ys*)
+          (k (cons (list (car xs) (car ys)) xs*)
+              ys*)))
+      (k '() ys)))
 
 (define (system* cmd . args)
   (let ((r (system (apply format (cons cmd args)))))
@@ -69,6 +97,9 @@
     (set! x (mod (+ increment (* multiplier x)) modulus))
     x))
 
+(define rand
+  (make-lcg 75 74 (+ (ash 2 16) 1) (get-process-id)))
+
 (define (random-bool)
   (= (mod (rand) 2) (mod (rand) 2)))
 
@@ -82,9 +113,6 @@
                             (+ (if (random-bool) 97 65)
                                (mod (rand) 26))))
           (loop s (- i 1))))))
-
-(define rand
-  (make-lcg 75 74 (+ (ash 2 16) 1) (get-process-id)))
 
 (define string->id-string
   (let ()
@@ -128,11 +156,11 @@
   (string->symbol (string->id-string (symbol->string sym))))
 
 (define generate-label
-  (let ((counter 0)
-        (rdm-str (random-string 4)))
+  (let ((count 0)
+        (rdm-str (random-string 8)))
     (lambda (prefix)
-      (set! counter (add1 counter))
-      (string->symbol (format "~a_~a_~a" prefix rdm-str counter)))))
+      (set! count (+ count 1))
+      (gensym (format "~a_~a_~a" prefix rdm-str count)))))
 
 (define (string-index s ch/pred)
   (define pred

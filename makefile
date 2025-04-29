@@ -1,14 +1,32 @@
-SCM_CC = ./compiler.out
+# Term		Meaning
+# build		System on which compiler is built
+# host		System on which compiler itself will run
+# target	System on which output of compiler will run
+
+SCM_CC =
 LIB_SRCS = intern.scm kernel.scm prim.scm lib/scheme-libs.scm lib/writer.scm lib/reader.scm
 LIB_OBJS = $(LIB_SRCS:.scm=.o)
-SCM_CC_SRCS = lib/match-defmacro.scm lib/set.scm lib/utils.scm desugar.scm front.scm compiler.scm
+SCM_CC_BACKEND =
+SCM_CC_SRCS = \
+	lib/match-defmacro.scm lib/set.scm lib/utils.scm \
+	desugar.scm tmp-alloc.scm front.scm $(SCM_CC_BACKEND)
 SCM_CC_OBJS = $(SCM_CC_SRCS:.scm=.o)
+CC = gcc
+CFLAGS += -g -fno-omit-frame-pointer -m$(WORDSIZE) -march=$(TARGET_ARCH)
+TARGET_ARCH ?= x86-64
+ifeq ($(TARGET_ARCH),x86-64)
+	WORDSIZE = 64
+else ifeq ($(TARGET_ARCH),i686)
+	WORDSIZE = 32
+else
+    $(error "Unknown machine architecture $(TARGET_ARCH)")
+endif
 
 TESTS =  test/test-lit.out \
 	test/test-unary.out \
 	test/test-binary-cmp.out \
 	test/test-arithmetic.out \
-	test/test-fx-0.out \
+	test/test-fx-$(WORDSIZE).out \
 	test/test-let.out \
 	test/test-if.out \
 	test/test-logic-conn.out \
@@ -59,29 +77,28 @@ LIB_TST_TGT_3 = test/test-lib-free-driver.out
 
 MULTI_FILE_TGT = $(LIB_TST_TGT_1) $(LIB_TST_TGT_2) $(LIB_TST_TGT_3) test/test-ffi-io.out test/test-command-line.out
 
-$(LIB_TST_TGT_1) : lib.o $(LIB_TST_SRC_1)
-	$(SCM_CC) -o $@ lib.o $(LIB_TST_SRC_1)
-	diff <(./$@) $*.txt
+SCM_LIB = lib$(WORDSIZE).o
 
-$(LIB_TST_TGT_2) : lib.o $(LIB_TST_SRC_2)
-	$(SCM_CC) -o $@ lib.o $(LIB_TST_SRC_2)
-	diff <(./$@) $*.txt
+$(LIB_TST_TGT_1) : $(SCM_LIB) $(LIB_TST_SRC_1)
+	diff <($(SCM_CC) $(SCM_LIB) $(LIB_TST_SRC_1)) $*.txt
 
-$(LIB_TST_TGT_3) : lib.o $(LIB_TST_SRC_3)
-	$(SCM_CC) -o $@ lib.o $(LIB_TST_SRC_3)
-	diff <(./$@) $*.txt
+$(LIB_TST_TGT_2) : $(SCM_LIB) $(LIB_TST_SRC_2)
+	diff <($(SCM_CC) $(SCM_LIB) $(LIB_TST_SRC_2)) $*.txt
 
-test/test-ffi-io.out : lib.o test/test-ffi-io.scm
-	$(SCM_CC) -o $@ lib.o test/test-ffi-io.scm
+$(LIB_TST_TGT_3) : $(SCM_LIB) $(LIB_TST_SRC_3)
+	diff <($(SCM_CC) $(SCM_LIB) $(LIB_TST_SRC_3)) $*.txt
+
+test/test-ffi-io.out : $(SCM_LIB) test/test-ffi-io.scm
+	$(SCM_CC) -o $@ $(SCM_LIB) test/test-ffi-io.scm
 	diff <(./$@) $*.scm
 	diff $*.scm $*.txt
 
-test/test-command-line.out : lib.o test/test-command-line.scm
-	$(SCM_CC) -o $@ lib.o $*.scm
+test/test-command-line.out : $(SCM_LIB) test/test-command-line.scm
+	$(SCM_CC) -o $@ $(SCM_LIB) $*.scm
 	diff <(./$@ reimu marisa -19 2 3 5) $*.txt
 
 runtime.o:
-	gcc -fno-omit-frame-pointer -m32 runtime.c -c -o runtime.o
+	$(CC) $(CFLAGS) runtime.c -c -o runtime.o
 
 prim.scm:
 	$(SCM_CC) --make-prim-lib prim.scm
@@ -92,56 +109,58 @@ $(LIB_OBJS) : %.o : %.scm
 $(SCM_CC_OBJS) : %.o : %.scm
 	$(SCM_CC) -o $@ $<
 
-lib.o: $(LIB_OBJS)
-	$(SCM_CC) -o lib.o $(LIB_OBJS)
+$(SCM_LIB): $(LIB_OBJS)
+	$(SCM_CC) -o $(SCM_LIB) $(LIB_OBJS)
+	rm $(LIB_OBJS) prim.scm
 
-$(SCM_NCC): runtime.o lib.o $(SCM_CC_OBJS)
-	$(SCM_CC) -o $(SCM_NCC) lib.o $(SCM_CC_OBJS)
+$(SCM_NCC): runtime.o $(SCM_LIB) $(SCM_CC_OBJS)
+	$(SCM_CC) -o $(SCM_NCC) $(SCM_LIB) $(SCM_CC_OBJS)
+	rm runtime.o $(SCM_CC_OBJS)
 
+make-lib : $(SCM_LIB)
 new-compiler: $(SCM_NCC)
 
-$(TESTS) : %.out : %.scm lib.o runtime.o
-	$(SCM_CC) -o ./$@ lib.o $<
+$(TESTS) : %.out : %.scm $(SCM_LIB) runtime.o
+	$(SCM_CC) -o $@ $(SCM_LIB) $<
 	diff <(./$@) $*.txt
-
-.PHONY: tests-seq
-tests-seq:
-	scheme --script run-test.scm "$(SCM_CC)" --bootstrap
 
 .PHONY: tests
 tests: $(TESTS) $(MULTI_FILE_TGT)
-	rm -rf $(TESTS) $(MULTI_FILE_TGT)
-
+	rm -f $(TESTS) $(MULTI_FILE_TGT)
 
 .PHONY: bootstrap-test
 bootstrap-test:
 	make rebuild-clean
-	time (make new-compiler SCM_CC="$(SCM_CC)" SCM_NCC="./compiler-new.out")
-	time (make tests SCM_CC="./compiler-new.out")
+	time (make new-compiler TARGET_ARCH=$(TARGET_ARCH) SCM_CC="$(SCM_CC)" SCM_NCC="./compiler-0.out")
+	time (make tests TARGET_ARCH=$(TARGET_ARCH) SCM_CC="./compiler-0.out")
 	(echo "##################") >> /dev/stderr
 	##########################################################################################
 	make clean
-	time (make compiler-0.out SCM_CC="./compiler-new.out" SCM_NCC="./compiler-0.out")
-	time (make tests SCM_CC="./compiler-0.out")
+	time (make new-compiler TARGET_ARCH=$(TARGET_ARCH) SCM_CC="./compiler-0.out" SCM_NCC="./compiler-1.out")
+	time (make tests TARGET_ARCH=$(TARGET_ARCH) SCM_CC="./compiler-1.out")
 	(echo "##################") >> /dev/stderr
 	##########################################################################################
 	make clean
-	time (make compiler-1.out SCM_CC="./compiler-0.out" SCM_NCC="./compiler-1.out")
-	time (make tests SCM_CC="./compiler-1.out")
+	time (make new-compiler TARGET_ARCH=$(TARGET_ARCH) SCM_CC="./compiler-1.out" SCM_NCC="./compiler-2.out")
+	time (make tests TARGET_ARCH=$(TARGET_ARCH) SCM_CC="./compiler-2.out")
 	make clean
 	(echo "##################") >> /dev/stderr
 	##########################################################################################
 	rm -f /dev/shm/scm-build*
 
-
-.PHONY: update
-update: bootstrap-test
-	mv ./compiler-1.out $(SCM_CC)
+.PHONY: cross-compile
+cross-compile-test:
+	make rebuild-clean
+	time (make new-compiler \
+			TARGET_ARCH=$(BUILD_ARCH) SCM_CC="$(BUILD_CC)" \
+			SCM_CC_BACKEND=$(SCM_CC_BACKEND) SCM_NCC="$(SCM_NCC)")
+	time (make tests TARGET_ARCH=$(TARGET_ARCH) SCM_CC="$(SCM_NCC)")
+	make bootstrap-test TARGET_ARCH=$(TARGET_ARCH) SCM_CC="$(SCM_NCC)"
 
 .PHONY: clean
 clean:
-	rm -f $(LIB_OBJS) $(SCM_CC_OBJS) compiler.o runtime.o lib.o prim.scm test/*.out
+	rm -f *.o test/*.out
 
 .PHONY: rebuild-clean
 rebuild-clean: clean
-	rm -f compiler-1.out compiler-0.out compiler-new.out
+	rm -f compiler-2.out compiler-1.out compiler-0.out

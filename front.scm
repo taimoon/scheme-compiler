@@ -6,7 +6,8 @@
   (only (utils)
     make-env extend-env extend-env* maybe-apply-env apply-env
     read-sexps-from-path align-to-multiple generate-label
-    symbol->id-symbol))
+    symbol->id-symbol)
+  (only (regalloc) assign-home-program lower-let-program))
 
 (define preprocess (let ()
 ;;; collect-quote
@@ -759,7 +760,7 @@
         (env*
          (extend-env params params
           (extend-env* (map (lambda (i fv) (list fv `(closure-ref ,clos ,i))) (iota (length fvs)) fvs) env))))
-    `(lambda (,clos . ,params) ,variadic? ,fn ,(map (lambda (fv) (apply-env fv env)) fvs) ,(convert-closure body env*))))
+    `(lambda (,clos . ,params) ,variadic? ,fn ,(map (lambda (fv) (list fv (apply-env fv env))) fvs) ,(convert-closure body env*))))
 
 (define (convert-closure e env)
   (match e
@@ -820,8 +821,8 @@
 (define (reveal-function-function params variadic? fn fvs body cont)
     (reveal-function body
       (lambda (body codes)
-        (cont `(closure ,fn ,fvs)
-                (cons `(,fn (code ,params ,variadic? () ,body))
+        (cont `(closure ,fn ,(map cadr fvs))
+                (cons `(,fn (code ,params ,variadic? ,(map car fvs) ,body))
                       codes)))))
 
 (define (reveal-function e cont)
@@ -998,8 +999,158 @@ This is to ease expose-alloc pass.
      `(program (labels . ,(map (lambda (c) (list (car c) (rco (cadr c)))) codes)) (data . ,data) (unbounds . ,unbounds) ,(rco e)))
     (,() (error "remove-complex-operand-program" "unmatch" prog))))
 
+;;; anf-of
+(define (identity x) x)
+
+(define (anf-of-exps es k)
+  ;;; first version implies that es can be evaluated concurrently
+  #;
+  (let loop ((es es)
+             (bs '())
+             (es* '()))
+    (cond
+      ((not (pair? es))
+       (make-let bs (k (reverse es*))))
+      ((simple? (car es))
+       (loop (cdr es) bs (cons (car es) es*)))
+      (else
+       (anf-of (car es)
+        (lambda (e)
+          (let ((tmp (generate-label "v")))
+            (loop (cdr es) (cons (list tmp e) bs) (cons tmp es*))))))))
+  (let loop ((es es) (es* '()))
+    (cond
+      ((not (pair? es))
+       (k (reverse es*)))
+      (else
+       (named-anf-of (car es)
+        (lambda (e*) (loop (cdr es) (cons e* es*))))))))
+
+(define (anf-of-let bs e k)
+  (let loop ((bs bs)
+             (bs* '()))
+    (cond
+      ((not (pair? bs))
+       (make-let bs* (anf-of e k)))
+      ((simple? (cadr (car bs)))
+       (loop (cdr bs) (cons (car bs) bs*)))
+      (else
+        (anf-of (cadr (car bs))
+          (lambda (e)
+            `(let ((,(car (car bs)) ,e))
+              ,(loop (cdr bs) bs*))))))))
+
+(define (anf-of-seq es k)
+  (let recur ((e (car es)) (es (cdr es)))
+    (if (not (pair? es))
+        (anf-of e k)
+        (anf-of e
+          (lambda (e)
+            `(let ((_ ,e))
+                ,(recur (car es) (cdr es))))))))
+
+(define (anf-intro-name e k)
+  (let ((tmp (generate-label "v")))
+    `(let ((,tmp ,e))
+      ,(k tmp))))
+
+(define (named-anf-of e k)
+  (if (simple? e)
+      (k e)
+      (anf-of e (lambda (e) (anf-intro-name e k)))))
+
+(define (anf-of e k)
+  (match e
+    (,()
+     (guard (simple? e))
+     (k e))
+    (,()
+     (guard (string? e))
+     (k e))
+    ((closure ,fn ,fvs)
+     (anf-of-exps fvs
+      (lambda (fvs) (k `(closure ,fn ,fvs)))))
+    ((closure-ref ,clos ,i)
+     (guard (and (simple? clos) (simple? i)))
+     (k e))
+    ((case-code . ,())
+     (k e))
+    ((code ,params ,variadic? ,fn ,e)
+     `(code ,params ,variadic? ,fn ,(anf-of e identity)))
+    ((call (prim ,pr) . ,es)
+     (anf-of-exps es
+      (lambda (es) (k `(call (prim ,pr) . ,es)))))
+    ((call ,maybe-decl . ,es)
+     (anf-of-exps es
+      (lambda (es) (k `(call ,maybe-decl . ,es)))))
+    ((foreign-call ,fn . ,es)
+     (anf-of-exps es
+      (lambda (es) (k `(foreign-call ,fn . ,es)))))
+    ((set-label! ,x ,e)
+     (named-anf-of e
+      (lambda (e) (k `(set-label! ,x ,e)))))
+    ((let ,bs ,e)
+     (anf-of-let bs e k))
+    ((collect ,sz)
+     (named-anf-of sz (lambda (sz) (k `(collect ,sz)))))
+    ((begin . ,es)
+     (anf-of-seq es k))
+    ((if ,pred ,conseq ,altern)
+     (let ((conseq (anf-of conseq identity))
+           (altern (anf-of altern identity)))
+        (named-anf-of pred
+          (lambda (pred) (k `(if ,pred ,conseq ,altern))))))
+    (,() (error "anf-of" "unmatch" e))))
+
+(define (anf-of-program prog)
+  (match prog
+    ((program (labels . ,codes) (data . ,data) (unbounds . ,unbounds) ,e)
+     `(program
+        (labels . ,(map (lambda (c) (list (car c) (anf-of (cadr c) identity))) codes))
+        (data . ,data)
+        (unbounds . ,unbounds)
+        ,(anf-of e identity)))
+    (,() (error "expose-alloc-program" "unmatch" prog))))
+
+;;; sequentialize
+(define (sequentialize e)
+  (match e
+    (,()
+     (guard (or (simple? e) (string? e)))
+     e)
+    ((prim ,())
+     e)
+    ((let ((,x ,e1)) ,e2)
+     `(let ((,x ,(sequentialize e1))) ,(sequentialize e2)))
+    ((let (,b . ,bs) ,e)
+     (sequentialize `(let (,b) (let ,bs ,e))))
+    ((,form . ,es)
+     (guard (memq form '(collect call if apply)))
+     `(,form . ,(map sequentialize es)))
+    ((foreign-call ,fn . ,es)
+     `(foreign-call ,fn . ,(map sequentialize es)))
+    ((code ,params ,variadic? ,fvs ,e)
+     `(code ,params ,variadic? ,fvs ,(sequentialize e)))
+    ((set-label! ,x ,e)
+     `(set-label! ,x ,(sequentialize e)))
+    ((,form . ,())
+     (guard (memq form '(closure closure-ref case-code)))
+     e)
+    (,() (error "sequentialize" "unmatch" e))))
+
+(define (sequentialize-program prog)
+  (match prog
+    ((program (labels . ,codes) (data . ,data) (unbounds . ,unbounds) ,e)
+     `(program
+        (labels .
+          ,(map (lambda (c) (list (car c) (sequentialize (cadr c)))) codes))
+        (data . ,data)
+        (unbounds . ,unbounds)
+        ,(sequentialize e)))
+    (,() (error "sequentialize-program" "unmatch" prog))))
+
 ;;; expose allocation
-(define WORDSIZE 4)
+(define WORDSIZE 8)
 
 (define (expose-alloc e)
   (match e
@@ -1147,6 +1298,10 @@ This is to ease expose-alloc pass.
     expand-operand-prim-program
     remove-complex-operand-program
     expose-alloc-program
+    anf-of-program
+    sequentialize-program
     explicate-program
+    assign-home-program
+    lower-let-program
     ))
 preprocess))

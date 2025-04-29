@@ -1,6 +1,13 @@
 ;;;; number
 (define (abs x) (if (< x 0) (- 0 x) x))
 
+(define (max x . xs)
+  (define (max x y) (if (< x y) y x))
+  (let iter ((x x) (xs xs))
+    (if (not (pair? xs))
+        x
+        (iter (max x (car xs)) (cdr xs)))))
+
 ;;;; cxr
 (define caar (lambda (x) (car (car x))))
 (define caaar (lambda (x) (car (car (car x)))))
@@ -250,16 +257,20 @@
             (loop (add1 i) (add1 k)))))))
 
 (define (string=? s1 s2)
-  (or (eq? s1 s2)
-      (and (string? s1) (string? s2)
-           (= (string-length s1) (string-length s2))
-           (let loop ((i 0))
+  (and
+    (string? s1)
+    (string? s2)
+    (or
+      (eq? s1 s2)
+      (and
+        (= (string-length s1) (string-length s2))
+        (let loop ((i 0))
              (cond
                ((eq? i (string-length s1))
                  #t)
                ((eq? (string-ref s1 i) (string-ref s2 i))
                  (loop (add1 i)))
-               (else #f))))))
+               (else #f)))))))
 
 (define (string-copy s)
   (let ((s* (make-string (string-length s) #\nul)))
@@ -409,7 +420,7 @@
         (else #f)))
 
 (define gensym
-  (let ((x 0))
+  (let ()
     (define (make-lcg multiplier increment modulus x)
       (lambda ()
         (set! x (mod (+ increment (* multiplier x)) modulus))
@@ -426,12 +437,19 @@
             (begin
               (string-set! s i (integer->char
                                 (+ (if (random-bool) 97 65)
-                                  (mod (rand) 26))))
+                                   (mod (rand) 26))))
               (loop s (- i 1))))))
 
     (define rand
       (make-lcg 75 74 (+ (ash 2 16) 1) (get-process-id)))
-    
-    (lambda ()
-      (set! x (add1 x))
-      (string->symbol (string-append "g" (number->string x) "-" (random-string 16))))))
+
+    (let ((x 0)
+          (rdm-str (random-string 4)))
+      (case-lambda
+        (()
+        (gensym "g"))
+        ((prefix)
+        (let ((str (string-append prefix rdm-str (number->string x))))
+            (set! x (add1 x))
+            (set! SYMBOL-STR-TABLE (cons str SYMBOL-STR-TABLE))
+            (%string->symbol str)))))))

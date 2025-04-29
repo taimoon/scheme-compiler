@@ -1,3 +1,4 @@
+(define (writeln x) (write x) (newline))
 (let ()
 (writeln (+ . (2 3)))
 )

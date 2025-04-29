@@ -1,28 +1,32 @@
+(define SYMBOL-STR-TABLE '())
+
 (define string->symbol
-  (let ((SYMBOL-STR-TABLE '())
-        (interned-size 0))
+  (let ()
     (define (string=? s1 s2)
-      (or (eq? s1 s2)
-          (and (string? s1) (string? s2)
-                (= (string-length s1) (string-length s2))
+      (and
+        (string? s1)
+        (string? s2)
+        (or
+          (eq? s1 s2)
+          (and
+            (= (string-length s1) (string-length s2))
             (let loop ((i 0))
-              (cond
-                ((eq? i (string-length s1))
-                  #t)
-                ((eq? (string-ref s1 i) (string-ref s2 i))
-                  (loop (add1 i)))
-                (else #f))))))
+                (cond
+                  ((eq? i (string-length s1))
+                    #t)
+                  ((eq? (string-ref s1 i) (string-ref s2 i))
+                    (loop (add1 i)))
+                  (else #f)))))))
     (define (string->symbol str)
       (let loop ((xs SYMBOL-STR-TABLE))
         (cond
           ((not (pair? xs))
-          (set! interned-size (add1 interned-size))
-          (set! SYMBOL-STR-TABLE (cons str SYMBOL-STR-TABLE))
-          (%string->symbol str))
+           (set! SYMBOL-STR-TABLE (cons str SYMBOL-STR-TABLE))
+           (%string->symbol str))
           ((string=? (car xs) str)
-          (%string->symbol (car xs)))
+           (%string->symbol (car xs)))
           (else
-          (loop (cdr xs))))))
+           (loop (cdr xs))))))
     string->symbol))
 
 (define symbol->string

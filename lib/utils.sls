@@ -25,10 +25,13 @@
     path-extension
     count-cons
     rpad
-    measure-pass)
+    measure-pass
+    lsort
+    partition
+    zip-k)
   (import
-    (rnrs (6))
+    (except (rnrs (6)) partition)
     (only (chezscheme)
-      include add1 sub1 system format
+      include add1 sub1 system format gensym
       string-set! ash get-process-id iota))
   (include "utils.scm"))
