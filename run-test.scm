@@ -3,6 +3,7 @@
   "test-unary"
   "test-binary-cmp"
   "test-arithmetic"
+  "test-fx-0"
   "test-let"
   "test-if"
   "test-logic-conn"
@@ -23,26 +24,32 @@
   "test-letrec"
   "test-named-let"
   "test-simple-define"
+  "test-include-driver"
+  '("test-lib-mut" "test-lib-mut-driver")
   '("test-lib-lib" "test-lib-driver")
   '("test-lib-free-lib" "test-lib-free-driver")
+  "test-top-level-set"
   "test-symbol"
   test-ffi-io
   "test-bitwise"
   "test-vararg"
-  "test-apply"
-  "test-tail-apply"
+  "test-dotted-app"
   "test-simple-gc-0"
   "test-simple-gc-1"
   "test-simple-gc-2"
   "test-simple-gc-3"
+  "test-apply"
+  "test-tail-apply"
   "test-case-lambda-0"
   "test-case-lambda-1"
   "test-case-lambda-2"
+  "test-case-lambda-3"
   test-command-line
   "test-operand-prim"
   "test-quasiquote"
   "test-match"
   "test-reader"
+  test-coro
   ))
 
 (define (system* cmd  . args)
@@ -65,17 +72,17 @@
     (display (format "test/~a.scm\n" res-filename))
   ;;; test -o option is working
   (compile
-    (format "-o /tmp/scm-build/~a.out lib.o ~a" 
+    (format "-o /tmp/scm-build-~a.out lib.o ~a" 
             res-filename
             (apply string-append
                    (map (lambda (s) (string-append " \"" s "\" ")) inputs))))
-  (system* "git diff test/~a.txt <(/tmp/scm-build/~a.out)"
+  (system* "git diff test/~a.txt <(/tmp/scm-build-~a.out)"
            res-filename res-filename))
 
 (define (run-a-file compile f)
   (display (format "test/~a.scm\n" f))
-  (compile (format "-o /tmp/scm-build/~a.out lib.o test/~a.scm" f f))
-  (system* "git diff test/~a.txt <(/tmp/scm-build/~a.out)" f f))
+  (compile (format "-o /tmp/scm-build-~a.out lib.o test/~a.scm" f f))
+  (system* "git diff test/~a.txt <(/tmp/scm-build-~a.out)" f f))
 
 (define (test-ffi-io compile)
   (display "test/test-ffi-io.scm\n")
@@ -91,21 +98,19 @@
     (format "-o ~a.out lib.o ~a.scm" filename filename))
   (system* "diff ~a.txt <(./~a.out reimu marisa -19 2 3 5)" filename filename))
 
-(define (compiler-0 cmd)
-  (system* "scheme --script compiler.so ~a" cmd))
-
-(define (compiler-1 cmd)
-  (system* "./compiler.out ~a" cmd))
-
-(define (compiler-2 cmd)
-  (system* "./compiler-1.out ~a" cmd))
+(define (test-coro compile)
+  (define filename "test/test-coro")
+  (display (format "~a.scm" filename)) (newline)
+  (compile
+    (format "-o ~a.out lib.o lib/coro.scm ~a.scm" filename filename))
+  (system* "diff ~a.txt <(./~a.out)" filename filename)
+  )
 
 (define (run-all-tests compiler)
   (display "====compiling library====\n")
-  (compiler "--make-prim-lib primitives.scm")
-  (compiler "--combine lib.o intern.scm kernel.scm primitives.scm lib/scheme-libs.scm lib/writer.scm lib/reader.scm")
+  (compiler "--make-prim-lib prim.scm")
+  (compiler "-o lib.o intern.scm kernel.scm prim.scm lib/scheme-libs.scm lib/writer.scm lib/reader.scm")
   (display "====done compiling library====\n")
-  (system* "mkdir -p /tmp/scm-build")
   (for-each
     (lambda (f)
       (cond
@@ -113,38 +118,43 @@
         ((procedure? f) (f compiler))
         (else (run-a-file compiler f))))
     (tests))
-  (system* "rm -f primitives.scm")
-  (system* "rm -f /tmp/scm-build/*")
-  (system* "rm -f test/*.out"))
+  (system*
+    (string-append
+      "rm -f prim.scm &"
+      "rm -f test/*.out &"
+      "rm -f /tmp/scm-build-*.out")))
+
+(define (boostrap-test comp-name)
+  (format #t "====~s====\n" comp-name)
+  (run-all-tests (lambda (cmd) (system* "~a ~a" comp-name cmd)))
+
+  (display "====\"compiler-0.out ~a\"====\n")
+  (system* "time (make clean; make new-compiler SCM_CC=~a SCM_NCC=compiler-0.out -j)" comp-name)
+  (run-all-tests (lambda (cmd) (system* "./compiler-0.out ~a" cmd)))
+
+  (display "====\"compiler-1.out ~a\"====\n")
+  (system* "time (make clean; make new-compiler SCM_CC=~a SCM_NCC=compiler-1.out -j)" "./compiler-0.out")
+  (display "====done bootstrap compiler-1.out from compiler-0.out====\n")
+  (run-all-tests (lambda (cmd) (system* "./compiler-1.out ~a" cmd))))
 
 (import (match))
 (match (cdr (command-line))
   ((,bootstrapper-cmd ,comp-name ,comp-cmd)
    (format #t "===bootstrapping===\n")
    (format #t "~a\n" bootstrapper-cmd)
-   (system* "scheme --script make-compiler.scm ~s ~s" bootstrapper-cmd comp-name)
+   (system* "./make-compiler.out ~s ~s" bootstrapper-cmd comp-name)
    (format #t "===done bootstrapping===\n")
-   (run-all-tests (lambda (cmd) (system (format comp-cmd cmd)))))
-  ((,comp-cmd)
-   (format #t "===~a===\n" comp-cmd)
-   (run-all-tests (lambda (cmd) (system (format comp-cmd cmd)))))
+   (run-all-tests (lambda (cmd) (system* comp-cmd cmd))))
+  ((,comp-name "--bootstrap")
+   (boostrap-test comp-name))
+  (("--chez")
+   (system "scheme --script make-compiler-chez.scm")
+   (run-all-tests (lambda (cmd) (system* "scheme --script compiler.so ~a" cmd)))
+   (system* "make clean; make new-compiler SCM_CC=~s SCM_NCC=compiler-new.out -j" "scheme --script compiler.so")
+   (boostrap-test "./compiler-new.out"))
+  ((,comp-name)
+   (format #t "===~a===\n" comp-name)
+   (run-all-tests (lambda (cmd) (system* "~a ~a" comp-name cmd))))
   (,cmd-ln
    (format #t "unknown argument, procceed to default\n")
-   (display "====compiler.so====\n")
-   (system* "scheme --script make-compiler.scm")
-   (run-all-tests (lambda (cmd) (system (format "scheme --script compiler.so ~a" cmd))))
-
-   (display "====compiler.out====\n")
-   (system* "scheme --script make-compiler.scm \"scheme --script compiler.so ~~a\" compiler.out")
-   (display "====done bootstrap compiler.out from compiler.so====\n")
-   (run-all-tests (lambda (cmd) (system (format "./compiler.out ~a" cmd))))
-
-   (display "====compiler-1.out====\n")
-   (system* "scheme --script make-compiler.scm \"./compiler.out ~~a\" compiler-1.out")
-   (display "====done bootstrap compiler-1.out from compiler.out====\n")
-   (run-all-tests (lambda (cmd) (system (format "./compiler-1.out ~a" cmd))))
-
-   (display "====compiler-2.out====\n")
-   (system* "scheme --script make-compiler.scm \"./compiler-1.out ~~a\" compiler-2.out")
-   (display "====done bootstrap compiler-2.out from compiler-1.out====\n")
-   (run-all-tests (lambda (cmd) (system (format "./compiler-2.out ~a" cmd))))))
+   (boostrap-test "./compiler.out")))

@@ -51,7 +51,7 @@
   (cond
     ((char? x)
      ;;; see r5rs, r7rs
-     (write-char x))
+     (write-char x op))
     ((integer? x)
      (%display (number->string x) op))
     ((boolean? x)
@@ -73,7 +73,7 @@
     ((string? x)
      (put-string x op))
     ((symbol? x)
-     (%display (symbol->string x)))
+     (%display (symbol->string x) op))
     ((null? x)
      (%display "()" op))
     ((procedure? x)
@@ -158,3 +158,8 @@
   (case-lambda
     ((x) (%write x (current-output-port)))
     ((x op) (%write x op))))
+
+(define writeln
+  (case-lambda
+    ((x) (writeln x (current-output-port)))
+    ((x op) (write x op) (newline op))))

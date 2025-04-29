@@ -1,8 +1,12 @@
 (library
   (utils)
   (export
+    improper-list?
+    improper->proper
+    writeln
     make-env
     extend-env
+    extend-env*
     maybe-apply-env
     apply-env
     
@@ -18,7 +22,10 @@
 
     path-fileroot
     path-filename
-    path-extension)
+    path-extension
+    count-cons
+    rpad
+    measure-pass)
   (import
     (rnrs (6))
     (only (chezscheme)

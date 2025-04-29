@@ -1,7 +1,26 @@
 # About
-This repo contains the compiler that compile scheme to i386 (or 32 bits of x86_64) machine code. The compiler source code is written scheme. The compiler can compile the compiler source code whose resulted compiler can again compile the compiler source code to get, say, `compiler-compiler.out` executable. The `compiler-compiler.out` manages to pass all the written tests.
+This repository contains a compiler that translates Scheme code into x86 machine code
+(specifically, 32-bit x86 or the 32-bit subset of x86_64).
+The compiler itself is implemented in Scheme.
+
+It supports self-hosting: it can compile its own source code.
+The resulting binary (let's call it compiler-compiler.out) is fully functional and capable of recompiling the compiler source code again.
+This bootstrapped compiler passes all provided test cases.
 
 # Changelog
+## 2025-04-08
+- Use `make` to do compilation and testing
+- Support for concurrent compilation and testing.
+  The testing time is shorter as you can run test in parallel.
+- Support `include`
+- Dependency: Linux OS `/dev/shm`
+- A proper table to store globals for garbage collection
+- Added passes:
+    - lift constant
+    - lift symbol
+    - constant-folding
+
+## 2024-11-21
 I complete rewrote the compiler.
 
 Previous compiler ran slow in bootstrapping is due to missing a key pass in compilation.
@@ -21,49 +40,27 @@ I've made the tail apply work properly. In addition, I add primitive case lambda
 
 # Prerequisite to run the compiler
 - x86_64
-- Linux OS
+- Fedora OS
 - installed gcc (default only install 64bits)
 - installed 32bits gcc compiler for x86_64
 - installed chez scheme
   - if you want to run the test
   - if you want to use scheme implementation other than the `compiler.out`
 
-# How to run in docker
-
-For non linux users, you may install docker for your OS,
-then proceed to do development in docker environment.
-
-Naively, think of `dockerfile` is a program of installation instruction for `docker` to make a `image`.
-Once the image is built by `docker`, you may ask `docker` to load and run the `image`.
-One of the option is to attach a terminal session after `docker` loading the `image`.
-The terminal session is your linux dev environment.
-
-```bash
-docker build -t fedora-chez-scheme .
-docker run -it -v $(pwd):/home/scheme-compiler fedora-chez-scheme
-# now you have a simple linux dev environment
-# may proceed to `How to compile`
-```
-
 # How to compile
 ```bash
-source activate.sh
-gcc -fno-omit-frame-pointer -m32 runtime.c -c -o runtime.o
-# run these 2 lines to precompile the library
-./compiler.out --make-prim-lib primitives.scm
-./compiler.out --combine lib.o \
-  intern.scm kernel.scm primitives.scm \
-  lib/scheme-libs.scm lib/writer.scm lib/reader.scm
-
+make lib.o runtime.o -j
+# to run
+./compiler.out lib.o test/test-unary.scm
+# to compile and run
 ./compiler.out -o a.out lib.o test/test-unary.scm
 ./a.out
 ```
 
 # Run the test
-Prerequisite: installed chez scheme
+
 ```bash
-./compiler.out -o run-test.out lib.o run-test.scm
-./run-test.out
+sh run-test.sh
 ```
 
 # Features used/supported
@@ -118,13 +115,17 @@ The extra null character is convenient in casting to C-string when interfacing w
 - C: `getpid` is available on *nix system.
 
 # Reference
-- [SRFI 200: Pattern Matching](https://srfi.schemers.org/srfi-200/srfi-200.html)
-- [An Incremental Approach to Compiler Construction](http://scheme2006.cs.uchicago.edu/11-ghuloum.pdf)
-- https://generalproblem.net/
-- https://cplusplus.com/reference/cstdio/
-- [how to extract data from elf files](https://stackoverflow.com/questions/1685483/how-can-i-examine-contents-of-a-data-section-of-an-elf-file-on-linux)
-- [GNU assembler `as`](https://sourceware.org/binutils/docs/as/)
-- [Scheme Variable Name Convention](http://community.schemewiki.org/?variable-naming-convention)
+- [List of ABI](https://github.com/rui314/psabi)
+- [An Incremental Approach to Compiler Construction](https://www.schemeworkshop.org/2006/11-ghuloum.pdf)
+- [A Nanopass Framework for Compiler Education](https://legacy.cs.indiana.edu/~dyb/pubs/nano-jfp.pdf)
+- [Scheme Workshop Keynote: Andy Keep](https://www.youtube.com/watch?v=BcC3KScZ-yA)
 - [Workshop: Mixing Mutability into the Nanopass Framework](https://www.youtube.com/watch?v=wTGlKCfP90A)
 - [x86 ISA Reference](https://c9x.me/x86)
 - [Félix Cloutier's x86 ISA Reference](https://www.felixcloutier.com/x86/)
+- [GNU assembler `as`](https://sourceware.org/binutils/docs/as/)
+- [Scheme Style Guide](http://community.schemewiki.org/?scheme-style)
+- [Scheme Variable Name Convention](http://community.schemewiki.org/?variable-naming-convention)
+- [Rabbit: a compiler for scheme](https://dspace.mit.edu/handle/1721.1/6913)
+- [Fixing Letrec](https://legacy.cs.indiana.edu/~dyb/pubs/fixing-letrec.pdf)
+- [Fixing Letrec (reloaded)](https://legacy.cs.indiana.edu/~dyb/pubs/letrec-reloaded.pdf)
+- [Optimizing Closures in O(0)-time](https://www.schemeworkshop.org/2012/papers/keep-hearn-dybvig-paper-sfp12.pdf)

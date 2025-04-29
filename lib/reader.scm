@@ -4,7 +4,7 @@
 (define (memq? x s)
   (if (memq x s) #t #f))
 
-(define str-buf (make-string 512))
+(define str-buf (make-string 512 #\nul))
 
 (define (%next-token p)
   #|

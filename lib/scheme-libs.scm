@@ -37,18 +37,6 @@
       (list? (cdr xs))
       (null? xs)))
 
-(define (cons* . xs)
-  (cond
-    ((null? xs) xs)
-    ((and (pair? xs) (null? (cdr xs)))
-     (car xs))
-    (else
-      (let recur ((xs xs))
-        (if (and (pair? xs) (null? (cdr xs)))
-            (car xs)
-            (cons (car xs) (recur (cdr xs))))))))
-(define list* cons*)
-
 (define (fold-left proc init xs)
   (if (pair? xs)
       (fold-left proc (proc init (car xs)) (cdr xs))
@@ -72,6 +60,20 @@
 
 (define (length xs)
   (fold-left (lambda (acm _) (add1 acm)) 0 xs))
+
+(define (andmap p xs)
+  (let loop ((xs xs))
+    (cond
+      ((not (pair? xs)) #t)
+      ((not (p (car xs))) #f)
+      (else (loop (cdr xs))))))
+
+(define (ormap p xs)
+  (let loop ((xs xs))
+    (cond
+      ((not (pair? xs)) #f)
+      ((p (car xs)) #t)
+      (else (loop (cdr xs))))))
 
 (define iota
   (case-lambda
@@ -152,10 +154,16 @@
               (apply f (cons (car xs) (map car xss)))
               (loop (cdr xs) (map cdr xss)))))))
 
-;;; vector
-(define (vector . xs)
-  (list->vector xs))
+(define (for-all pred xs)
+  (if (not (pair? xs))
+      #t
+      (if (pred (car xs))
+          (for-all pred (cdr xs))
+          #f)))
 
+(define (exists pred xs) (not (for-all pred xs)))
+
+;;; vector
 (define (vector-equal? v w)
   (and (eq? v w)
        (eq? (vector-length v)
@@ -223,7 +231,7 @@
   (and (char<=? #\0 c)
        (char<=? c #\9)))
 (define char-whitespace?
-  ; #\space #\newline #\return #\linefeed #\tab
+  ; (#\space #\newline #\return #\linefeed #\tab)
   (let ((whitespaces (map integer->char '(32 10 13 10 9))))
     (lambda (c) (if (memq c whitespaces) #t #f))))
 
@@ -233,7 +241,7 @@
 
 (define (substring s i j)
   (let* ((len (- j i))
-         (t (make-string len)))
+         (t (make-string len #\nul)))
     (let loop ((i i) (k 0))
       (if (>= i j)
           t
@@ -254,7 +262,7 @@
                (else #f))))))
 
 (define (string-copy s)
-  (let ((s* (make-string (string-length s))))
+  (let ((s* (make-string (string-length s) #\nul)))
     (string-copy! s 0 s* 0 (string-length s))
     s*))
 
@@ -266,7 +274,7 @@
         (string-copy! src (add1 src-start) dst (add1 dst-start) (sub1 n)))))
 
 (define (string-append . ss)
-  (let ((res (make-string (fold-left + 0 (map string-length ss)))))
+  (let ((res (make-string (fold-left + 0 (map string-length ss)) #\nul)))
     (let loop ((ss ss) (split 0))
       (if (pair? ss)
           (begin
@@ -278,7 +286,7 @@
   (let recur ((xs xs) (i 0))
     (cond 
       ((not (pair? xs))
-       (make-string i))
+       (make-string i #\nul))
       ((not (char? (car xs)))
        (error "list->string" "expect char" (car xs)))
       (else
@@ -335,7 +343,7 @@
       (if (< obj 0)
           (string-append "-" (number->string (- obj)))
           (number->string obj))]
-     [(char? obj) (string-append "#\\" (make-string obj))]
+     [(char? obj) (string-append "#\\" (string obj))]
      [(boolean? obj) (if obj "#t" "f")]
      [(and (string? obj) w?) (string-append "\"" obj "\"")]
      [(string? obj) obj]
@@ -378,7 +386,6 @@
             (error "format" "too many control string"))
         (loop s (+ i 2) (+ i 2) (cdr args) (cons (obj->repr (car args) #t) (cons (substring s j i) acm)))]
       [else (loop s (add1 i) j args acm)]))
-  
   (cond [(string? f) (loop f 0 0 args '())]
         [(and (port? f) (pair? args) (string? (car args)))
          (display (loop (car args) 0 0 (cdr args) '()) f)]
@@ -412,7 +419,7 @@
       (= (mod (rand) 2) (mod (rand) 2)))
 
     (define (random-string len)
-      (let loop ((s (make-string len))
+      (let loop ((s (make-string len #\nul))
                 (i (- len 1)))
         (if (< i 0)
             s
@@ -427,4 +434,4 @@
     
     (lambda ()
       (set! x (add1 x))
-      (string->symbol (string-append (random-string 16) "-" (number->string x))))))
+      (string->symbol (string-append "g" (number->string x) "-" (random-string 16))))))

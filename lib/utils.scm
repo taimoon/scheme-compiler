@@ -1,3 +1,8 @@
+(define (writeln obj . args)
+  (let ((op (if (pair? args) (car args) (current-output-port))))
+    (write obj op)
+    (newline op)))
+
 (define (make-env) '())
 
 (define (extend-env xs vs env)
@@ -10,6 +15,9 @@
                (extend-env (cdr xs) (cdr vs) env))
          (error "extend-env" "bad value list" vs)))
     (else env)))
+
+(define (extend-env* bs env)
+  (fold-right cons env bs))
 
 (define (maybe-apply-env x env)
   (cond
@@ -26,8 +34,25 @@
         (cadr res)
         (error "apply-env" "unbound" x (map car env)))))
 
+(define (partition-k pred xs k)
+  (let recur ((xs xs) (k k))
+    (cond
+      ((not (pair? xs))
+       (k '() '()))
+      ((pred (car xs))
+       (recur (cdr xs)
+              (lambda (ts fs) (k (cons (car xs) ts)
+                                 fs))))
+      (else
+       (recur (cdr xs)
+              (lambda (ts fs) (k ts
+                                 (cons (car xs) fs))))))))
+
 (define (system* cmd . args)
-  (system (apply format (cons cmd args))))
+  (let ((r (system (apply format (cons cmd args)))))
+    (if (eq? r 0)
+        r
+        (exit r))))
 
 (define (read-sexps-from-path filename)
   (let ((inp (open-input-file filename)))
@@ -48,7 +73,7 @@
   (= (mod (rand) 2) (mod (rand) 2)))
 
 (define (random-string len)
-  (let loop ((s (make-string len))
+  (let loop ((s (make-string len #\nul))
              (i (- len 1)))
     (if (< i 0)
         s
@@ -61,39 +86,53 @@
 (define rand
   (make-lcg 75 74 (+ (ash 2 16) 1) (get-process-id)))
 
-(define (string->id-string str)
-  (define (integer->alphabet-str n)
-    (string #\_ (integer->char (+ n (char->integer #\a))) #\_))
-  (define extended-alphabets
-    (let ((xs (list #\! #\$ #\% #\& #\* #\+ #\- #\. #\/ #\: #\< #\= #\> #\? #\@ #\^ #\_ #\~)))
-      (map cons
-           xs
-           (map integer->alphabet-str (iota (length xs))))))
-  (define (numeric-char? ch)
-    (and (char<=? #\0 ch) (char<=? ch #\9)))
-  (define (valid-id-char? ch)
-    (or (and (char<=? #\a ch) (char<=? ch #\z))
-        (and (char<=? #\A ch) (char<=? ch #\Z))
-        (char=? #\_ ch)
-        (numeric-char? ch)))
-  (define underscore-str (string #\_))
-  (define (char->valid-id-str ch)
-    (if (valid-id-char? ch)
-        (string ch)
-        (let ((res (assoc ch extended-alphabets)))
-          (if res
-              (cdr res)
-              underscore-str))))
-  (apply string-append (cons underscore-str (map char->valid-id-str (string->list str)))))
+(define string->id-string
+  (let ()
+    (define extended-named-alphabets (map (lambda (b) (list (car b) (string-append "_" (cadr b) "_")))
+  '(
+    (#\! "bang")
+    (#\$ "dollar")
+    (#\% "cent")
+    (#\& "ampersand")
+    (#\* "star")
+    (#\+ "plus")
+    (#\- "dash")
+    (#\. "dot")
+    (#\/ "slash")
+    (#\: "colon")
+    (#\< "lt")
+    (#\= "eq")
+    (#\> "gt")
+    (#\? "query")
+    (#\@ "at")
+    (#\^ "hat")
+    (#\~ "tilde")
+    (#\_ "ul")
+    )))
+    (define (numeric-char? ch)
+      (and (char<=? #\0 ch) (char<=? ch #\9)))
+    (define (valid-id-char? ch)
+      (or (and (char<=? #\a ch) (char<=? ch #\z))
+          (and (char<=? #\A ch) (char<=? ch #\Z))
+          (numeric-char? ch)))
+    (define (char->valid-id-str ch)
+      (if (valid-id-char? ch)
+          (string ch)
+          (let ((res (assoc ch extended-named-alphabets)))
+            (if res
+                (cadr res)
+                "_"))))
+  (lambda (str) (apply string-append (cons "_" (map char->valid-id-str (string->list str)))))))
 
 (define (symbol->id-symbol sym)
   (string->symbol (string->id-string (symbol->string sym))))
 
 (define generate-label
-  (let ((counter 0))
+  (let ((counter 0)
+        (rdm-str (random-string 4)))
     (lambda (prefix)
       (set! counter (add1 counter))
-      (string->symbol (format "~a_~a_~a" prefix (random-string 8) counter)))))
+      (string->symbol (format "~a_~a_~a" prefix rdm-str counter)))))
 
 (define (string-index s ch/pred)
   (define pred
@@ -168,4 +207,31 @@ Extension       .txt             .txt
          (maybe-idx (string-index-right s #\.)))
     (if maybe-idx
         (substring s 0 maybe-idx)
-        "")))
+        s)))
+
+;;; for perf measurement 
+(define (count-cons e)
+  (if (pair? e)
+      (add1 (+ (count-cons (car e)) (count-cons (cdr e))))
+      0))
+
+(define (improper-list? xs)
+  (cond
+    ((null? xs) #f)
+    ((pair? xs) (improper-list? (cdr xs)))
+    (else #t)))
+
+(define (improper->proper xs)
+  (cond
+    ((null? xs) xs)
+    ((symbol? xs) (list xs))
+    ((pair? xs) (cons (car xs) (improper->proper (cdr xs))))
+    (else (error "improper->proper" "unknown object" xs))))
+
+(define (rpad s pad-ch pad-sz)
+  (if (< (string-length s) pad-sz)
+      (string-append s (make-string (- pad-sz (string-length s)) pad-ch))
+      s))
+
+(define (measure-pass $who)
+  (lambda (e) (format (current-error-port) "~a: ~a\n" (rpad (format "~a" $who) #\space 32) (count-cons e)) e))

@@ -13,7 +13,7 @@
 (write (vector -1 0 1 #t #f #\t #\f))
 (newline)
 
-(write #(-1 0 1 #t #f #\t #\f))
+(write '#(-1 0 1 #t #f #\t #\f))
 (newline)
 
 (let ((xs (make-vector 3)))

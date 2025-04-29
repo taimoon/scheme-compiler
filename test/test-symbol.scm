@@ -3,6 +3,8 @@
   (newline))
 (write-line 'bad)
 (write-line 'apple)
+(write-line (symbol? 'bad))
+(write-line (symbol? "bad"))
 (write-line (eq? 'reimu 'reimu))
 (write-line (eq? 'reimu "reimu"))
 (write-line '(1 2 3))

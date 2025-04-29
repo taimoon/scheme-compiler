@@ -1,0 +1,1 @@
+(set! SOME-CONST 0)

@@ -1,5 +1,6 @@
 (import
-  (front)
+  (only (desugar) write-primitive-lib)
+  (only (front) preprocess)
   (only (match) match)
   (only (set) make-set set-union set-diff)
   (only (utils)
@@ -17,7 +18,7 @@
 
 (i686
   (caller-save eax ecx edx)
-  (callee-save ebp ebx edi esi esp))
+  (callee-save ebp edi esi esp))
 (x64
   (caller-save
     rax rcx rdx rsi rdi r8 r9 r10 r11)
@@ -62,28 +63,96 @@ symbol
   ->string
 closure
   ; allocated lambda
-  (code-pointer fx-free-vars-counts&lambda fv0 fv1 ...)
-  ; static
-  (code-pointer 1)
+  (code-pointer fx-free-vars-counts fv0 fv1 ...)
 |#
 
 #|TODO:
-- optimize known call like label-call, how it can be tail call
-- simpler implementation of converting letrec
 - %esi shall be used as the heap pointer
 - inline requested size check rather than rely on gc-flip
 |#
 
+#;
+(calling layout
+  "si points to free cell; starts with -4(%esp).
+   Current impl allocate location for locals without mutating the stack pointer.
+   In other words, current frame does not mutate esp.
+   Therefore, esp here will act frame pointer for gc tracing purpose.
+   That is esp always points to old esp.
+   Since ebp is used for closure pointer, the caller need to save the frame pointer.
+  "
+  before-call
+  (
+    +4    ret-addr*
+    esp*  fp
+    -4    arg*-0
+    -8    arg*-1
+    ...
+    +4    local-n
+    si    _
+  )
+  prepare-argument
+  (
+    +4    ret-addr*
+    esp*  fp
+    -4    arg*-0
+    -8    arg*-1
+    ...
+    +4    local-n
+    si    _     ;;; to be return address
+    -4    esp*  ;;; push by caller
+    -8    arg-0
+    -16   arg-1
+    ...
+  )
+  prepare-to-call
+  (
+    +4    ret-addr*
+    _     fp
+    -4    arg*-0
+    -8    arg*-1
+    ...
+    esp   local-n
+    -4    _       ;;; to be return address
+    -8    esp*    ;;; push by caller
+    -16   arg-0
+    -24   arg-1
+    ...
+  )
+  enter-callee
+  (
+    esp ret-addr
+    _   old-fp
+    _   arg-0
+    _   arg-1
+    _   arg-2
+    ...
+  )
+  evaluate-callee-body
+  substract esp
+  (
+    +4    ret-addr
+    esp   old-fp
+    -4    arg-0
+    -8    arg-1
+    -16   arg-2
+    ...
+    +4    arg-n
+    si    _
+  )
+)
+(let ()
 (define FIXNUM-MASK   #b00000011)
 (define FIXNUM-TAG    #b00000000)
 (define FIXNUM-SHIFT  2)
 (define IMM-SHIFT     8)
 (define IMM-MASK      #b11111111)
+(define IMM-TAG       #b00000111)
+(define EOF-TAG       #b00000111)
 (define CHAR-TAG      #b00001111)
 (define BOOL-TAG      #b00011111)
-(define NIL-TAG       #b01011111)
-(define FALSE-IMM BOOL-TAG)
-(define TRUE-IMM (bitwise-ior (ash 1 IMM-SHIFT) BOOL-TAG))
+(define NIL-TAG       #b00111111)
+(define FALSE-IMM     BOOL-TAG)
+(define TRUE-IMM      (bitwise-ior (ash 1 IMM-SHIFT) BOOL-TAG))
 (define PTR-MASK      #b00000111)
 (define PAIR-TAG      #b00000001)
 (define VEC-TAG       #b00000010)
@@ -114,11 +183,6 @@ closure
     ((null? imm)
      NIL-TAG)
     (else (error "immediate-rep" "unknown immediate" imm))))
-
-(define (emit-seq op es si env)
-  (for-each
-    (lambda (e) (emit-expr op e si env))
-    es))
 
 (define (emit-eax=? op v)
   (emit op "cmp $~a, %eax" v)
@@ -154,8 +218,8 @@ closure
           (recur
             (cdr bindings)
             (- si WORDSIZE)
-            (extend-env (caar bindings) (format "mov ~a(%esp), %eax" si) inner-env)))
-        (emit-seq op body si inner-env))))
+            (extend-env (caar bindings) (format "~a(%esp)" si) inner-env)))
+        (emit-expr op body si inner-env))))
 
 (define (emit-if op pred conseq altern si env)
   (let ((end-label (generate-label "end"))
@@ -170,8 +234,7 @@ closure
     (emit op "~a: " end-label)))
 
 (define (emit-str-lit op s si)
-  (emit-walk-stack op (+ (add1 (string-length s)) WORDSIZE) si (make-env))
-  (emit op "mov free_ptr, %eax")
+  (emit op "mov (free_ptr), %eax")
   (emit op "addl $~a, (free_ptr)"
            (align-to-multiple 8 (+ WORDSIZE (+ 1 (string-length s)))))
   (emit op "movl $~a, (%eax)" (immediate-rep (string-length s)))
@@ -185,24 +248,19 @@ closure
   (emit op "or $~a, %eax" STR-TAG))
 
 (define (emit-vector op es si env)
+  ;;; es are list of atomized subexpression
   (let ((sz (length es)))
-    (emit-walk-stack op (* (+ sz 1) WORDSIZE) si (make-env))
-    (emit op "mov free_ptr, %eax")
-    (emit op "movl $~a, (%eax)" (immediate-rep sz))
-    (emit op "addl $~a, free_ptr" (align-to-multiple 8 (* (+ sz 1) WORDSIZE)))
-    (emit op "or $~a, %eax" VEC-TAG)
-    (emit op "mov %eax, ~a(%esp)" si)
-    (if (<= sz 0)
-        #t
-        (begin
-          (for-each
-            (lambda (i e)
-              (emit-expr op e (- si WORDSIZE) env)
-              (emit op "mov ~a(%esp), %ecx" si)
-              (emit op "mov %eax, ~a(%ecx)" (- (* (+ i 1) WORDSIZE) VEC-TAG)))
-            (iota sz)
-            es)
-          (emit op "mov %ecx, %eax")))))
+    (emit op "mov (free_ptr), %ecx")
+    (emit op "movl $~a, (%ecx)" (immediate-rep sz))
+    (emit op "addl $~a, (free_ptr)" (align-to-multiple 8 (* (+ sz 1) WORDSIZE)))
+    (for-each
+      (lambda (i e)
+        (emit-expr op e si env)
+        (emit op "mov %eax, ~a(%ecx)" (* (+ i 1) WORDSIZE)))
+      (iota sz)
+      es)
+    (emit op "mov %ecx, %eax")
+    (emit op "or $~a, %eax" VEC-TAG)))
 
 (define (emit-prim op e si env)
   (match e
@@ -210,6 +268,16 @@ closure
      (emit-walk-stack op -1 si env))
     ((%walk-stack ,e)
      (emit-walk-stack op e si env))
+    ((align-to-multiple 8 ,e)
+     (emit-expr op e si env)
+     (emit op "add $~a, %eax" (immediate-rep (- 8 1)))
+     (emit op "and $~a, %eax" (immediate-rep -8)))
+    ((eof-object)
+     (emit op "mov $~a, %eax" EOF-TAG))
+    ((eof-object? ,e)
+     (emit-expr op e si env)
+     (emit op "and $~a, %eax" IMM-MASK)
+     (emit-eax=? op EOF-TAG))
     ((integer? ,e)
      (emit-expr op e si env)
      (emit op "and $~a, %eax" FIXNUM-MASK)
@@ -253,6 +321,26 @@ closure
      (emit-expr op e1 (- si WORDSIZE) env)
      (emit op "sar $~a, %eax" FIXNUM-SHIFT)
      (emit op "imul ~a(%esp), %eax" si))
+    ((fxabs ,e1)
+     (emit-expr op e1 si env)
+     (emit op "mov %eax, %ecx")
+     (emit op "neg %ecx")
+     (emit op "cmovg %ecx, %eax"))
+    ((fxmax ,e1 ,e2)
+     (emit-expr op e2 si env)
+     (emit op "mov %eax, ~a(%esp)" si)
+     (emit-expr op e1 (- si WORDSIZE) env)
+     (emit op "cmp %eax, ~a(%esp)" si)
+     (emit op "cmovg ~a(%esp), %eax" si))
+    ((fixnum-width)
+     (emit op "mov $~a, %eax" (immediate-rep (- (ash WORDSIZE 3) 2))))
+    ((fxlength ,e1)
+     (emit-prim op `(fxabs ,e1) si env)
+     (emit op "or $~a, %eax" FIXNUM-MASK)
+     (emit op "lzcnt %eax, %eax")
+     (emit op "neg %eax")
+     (emit op "add $~a, %eax" (- (ash WORDSIZE 3) 2))
+     (emit op "sal $~a, %eax" FIXNUM-SHIFT))
     ((div ,dividend ,divisor)
      #;((div (* t x) (* t y))
         => (div x y)
@@ -307,19 +395,12 @@ closure
      (emit-expr op e si env)
      (emit op "and $~a, %eax" PTR-MASK)
      (emit-eax=? op PAIR-TAG))
-    ((cons ,e1 ,e2)
-     (emit-expr op e1 si env)
-     (emit op "mov %eax, ~a(%esp)" si)
-     (emit-expr op e2 (- si WORDSIZE) env)
-     
-     (emit op "mov %eax, ~a(%esp)" (- si WORDSIZE))
-     (emit-walk-stack op (* 2 WORDSIZE) (- si (* 2 WORDSIZE)) (make-env))
-     
-     (emit op "mov free_ptr, %ecx")
+    ((cons ,simp1 ,simp2)
+     (emit op "mov (free_ptr), %ecx")
      (emit op "addl $~a, (free_ptr)" (* 2 WORDSIZE))
-     (emit op "mov ~a(%esp), %eax" (- si WORDSIZE))
+     (emit-expr op simp2 si env)
      (emit op "mov %eax, ~a(%ecx)" WORDSIZE)
-     (emit op "mov ~a(%esp), %eax" si)
+     (emit-expr op simp1 si env)
      (emit op "mov %eax, (%ecx)")
      (emit op "mov %ecx, %eax")
      (emit op "or $~a, %eax" PAIR-TAG))
@@ -345,20 +426,11 @@ closure
      (emit-expr op e si env)
      (emit op "and $~a, %eax" PTR-MASK)
      (emit-eax=? op STR-TAG))
-    ((make-string ,k)
-     (emit-expr op `(prim-call make-string ,k #\nul) si env))
-    ((make-string ,k ,ch)
-     (emit-expr op ch si env)
-     (emit op "mov %eax, ~a(%esp)" si)
-     (emit-expr op k (- si WORDSIZE) env)
-     (emit op "mov %eax, ~a(%esp)" (- si WORDSIZE))
-
-     (emit op "add $~a, %eax" (immediate-rep (add1 WORDSIZE)))
-     (emit-walk-stack op '%eax (- si (* 2 WORDSIZE)) (make-env))
-     
-     (emit op "mov free_ptr, %edx")
-     (emit op "mov free_ptr, %edi")
-     (emit op "mov ~a(%esp), %eax" (- si WORDSIZE))
+    ((make-string ,sz ,ch)
+     ;;; sz and ch are already values
+     (emit op "mov (free_ptr), %edx")
+     (emit op "mov (free_ptr), %edi")
+     (emit-expr op sz si env)
      (emit op "mov %eax, (%edi)") ; store the length
      ; align and fill
      (emit op "sar $~a, %eax" FIXNUM-SHIFT)
@@ -367,7 +439,7 @@ closure
      (emit op "and $-8, %eax")
      (emit op "add %eax, (free_ptr)")
      (emit op "add $~a, %edi" WORDSIZE)
-     (emit op "mov ~a(%esp), %eax" si)  ; restore the character
+     (emit-expr op ch si env)
      (emit op "sar $~a, %eax" IMM-SHIFT)
      (emit op "cld")
      (emit op "rep stosb")
@@ -409,23 +481,17 @@ closure
     ((vector-length ,e)
      (emit-expr op e si env)
      (emit op "mov ~a(%eax), %eax" (- VEC-TAG)))
-    ((make-vector ,k)
-     (emit-expr op k si env)
-     (emit op "mov %eax, ~a(%esp)" si)
-
-     (emit op "imul $~a, %eax" WORDSIZE)
-     (emit op "add $~a, %eax" (immediate-rep WORDSIZE))
-     (emit-walk-stack op '%eax (- si WORDSIZE) (make-env))
-     
-     (emit op "mov ~a(%esp), %eax" si)
-     (emit op "mov free_ptr, %edx")
-     (emit op "mov free_ptr, %edi")
+    ((make-vector ,sz)
+     ;;; sz is already value
+     (emit-expr op sz si env)
+     (emit op "mov (free_ptr), %edx")
+     (emit op "mov (free_ptr), %edi")
      (emit op "mov %eax, (%edi)") ; store the length
      (emit op "mov %eax, %ecx")
      (emit op "add $11, %ecx")
      (emit op "and $-8, %ecx")
      (emit op "add %ecx, (free_ptr)")
-     (emit op "mov free_ptr, %edi")
+     (emit op "mov (free_ptr), %edi")
      (emit op "lea ~a(%edx), %edi" WORDSIZE)
      (emit op "mov %eax, %ecx")
      (emit op "sal $~a, %ecx" FIXNUM-SHIFT)
@@ -466,23 +532,61 @@ closure
     (,() (error "emit-prim" "unmatch" e))))
 
 (define (emit-walk-stack op e si env)
+  ;;; NOTE:
+  ;;; The procedure assume esp is the frame pointer
+  ;;; And top stack pointer implied by the si parameter
+  ;;; gc_flip(word_t fx_size, word_t *esp, word_t *ebp)
+  (if (not (eq? e '%eax))
+      (emit-expr op e si env))
   (cond
-    ((not e)
-     (emit op "mov $~a, %eax" (immediate-rep -1)))
-    ((eq? e '%eax) #t)
-    (else (emit-expr op e si env)))
-  (emit op "lea ~a(%esp), %ecx" (+ si WORDSIZE))
-  (emit op "mov %esp, %edx")
-  (emit op "sub $~a, %esp" (- (abs si) WORDSIZE))
-  (emit op "push %edx")
-  (emit op "push %ecx")
-  (emit op "push %eax")
-  (emit op "call walk_stack")
-  (emit op "add $~a, %esp" (+ (abs si) (* 2 WORDSIZE)))
-  (emit op "mov ~a(%esp), %ebp" (- WORDSIZE))
-  )
+    ((integer? si)
+     (emit op "lea ~a(%esp), %ecx" (- (- (abs si) WORDSIZE)))  ; store the stack pointer
+     (emit op "mov %esp, %edx")                                ; store the frame pointer
+     (emit op "sub $~a, %esp" (- (abs si) WORDSIZE))           ; substract esp
+     (emit op "push %edx") ; *ebp
+     (emit op "push %ecx") ; *esp
+     (emit op "push %eax") ; fx_size
+     (emit op "call gc_flip")
+     (emit op "add $~a, %esp" (+ (- (abs si) WORDSIZE) (* 3 WORDSIZE)))
+     (emit op "mov ~a(%esp), %ebp" (- WORDSIZE)))
+    ((eq? si '%ecx)
+     ;;; %ecx : amount of words on stack from frame pointer
+     ;;; Do gc here before constructing vararg
+     ; So the %ecx here is callee save
+     ; Have to save the **incoming** argument count to avoid being destroyed by gc
+     ; see emit-walk-stack for implementation.
+     ; Because incoming argument count cannot be known in advance
+     ; causing the stack pointer cannot be calculated in advance
+     ; therefore, have to calculate the stack pointer dynamically
+     ; hence requiring special implementation here
+     (emit op "mov %esp, %edx")    ; store the frame pointer for gc
 
-(define (emit-tail-call op fn args si env)
+     (emit op "sal $~a, %ecx" FIXNUM-SHIFT)
+     (emit op "sub %ecx, %esp")
+     (emit op "mov %ecx, ~a(%esp)" (- WORDSIZE))
+     ;;; call to gc
+     ;;; calculate (align 8 (* 2 WORDSIZE argc))
+     ; operand of imul don't need to be tagged again
+     (emit op "mov %ecx, %eax")
+     (emit op "imul $~a, %eax" (* 2 WORDSIZE))
+     (emit op "add $~a, %eax" (immediate-rep (- 8 1)))
+     (emit op "and $~a, %eax" (immediate-rep -8))
+    
+     (emit op "sub $~a, %esp" WORDSIZE)
+     (emit op "lea (%esp), %ecx")
+     (emit op "push %edx")
+     (emit op "push %ecx")
+     (emit op "push %eax")
+     (emit op "call gc_flip")
+     (emit op "add $~a, %esp" (* 4 WORDSIZE)) ; pop out args and argc
+     ;;; end of gc
+     ; restore
+     (emit op "mov ~a(%esp), %ecx" (- WORDSIZE))
+     (emit op "add %ecx, %esp")
+     (emit op "sar $~a, %ecx" FIXNUM-SHIFT))
+    (else (error "emit-walk-stack" "unknown" si))))
+
+(define (emit-tail-call op maybe-decl fn args si env)
   (let* ((argc (length (cons fn args)))
          (calc-offset (lambda (i) (- si (* WORDSIZE i)))))
     (for-each
@@ -491,42 +595,30 @@ closure
         (emit op "mov %eax, ~a(%esp)" offset))
       (map calc-offset (iota argc))
       (cons fn args))
-    
-    ;;; NOTE: It's easier to collect before entering variadic function.
-    (emit-walk-stack op argc (calc-offset argc) env)
     ;;; copying the memory
     (for-each
       (lambda (i)
         (emit op "mov ~a(%esp), %eax" (calc-offset i))
         (emit op "mov %eax, ~a(%esp)" (* (- WORDSIZE) (+ i 1))))
       (iota argc))
-    #;(begin
-      #|
-      ;;; copying the memory (alternative impl)
-      but it slow down the compiler significantly (4x times)
-      possible reason:
-      - alignment
-      - function usually is not called with too many arguments
-      |#
-      (emit op "lea ~a(%esp), %esi" si)
-      (emit op "lea ~a(%esp), %edi" (- WORDSIZE))
-      (emit op "mov $~a, %ecx" argc)
-      (emit op "std") ;;; set the flag to decrement stack pointer while copying
-      (emit op "rep movsl")
-      (emit op "cld") ;;; maintain the invariant that copying is incrementing
-    )
-    
     (emit op "mov $~a, %ecx" argc)
-    (emit op "mov ~a(%esp), %eax" (- WORDSIZE))
-    (emit op "mov ~a(%eax), %eax" (- CLOS-TAG))
-    (emit op "add $~a, %esp" WORDSIZE)
-    (emit op "jmp *%eax")))
+    (match maybe-decl
+      ((label ,lbl)
+       (emit op "add $~a, %esp" WORDSIZE)
+       (emit op "jmp ~a" lbl))
+      (#f
+       (emit op "mov ~a(%esp), %eax" (- WORDSIZE))
+       (emit op "mov ~a(%eax), %eax" (- CLOS-TAG))
+       (emit op "add $~a, %esp" WORDSIZE)
+       (emit op "jmp *%eax"))
+      (,() (error "emit-tail-call" "unmatch" maybe-decl)))))
 
-(define (emit-call op fn args si env)
+(define (emit-call op maybe-decl fn args si env)
   (let* ((argc (length (cons fn args)))
          (start-si (- si (* 2 WORDSIZE)))
          (calc-offset (lambda (i) (- start-si (* WORDSIZE i)))))
     (emit op "movl $0, ~a(%esp)" si)
+    ;;; this store the frame pointer
     (emit op "movl %esp, ~a(%esp)" (- si WORDSIZE))
     (for-each
       (lambda (offset arg)
@@ -534,16 +626,19 @@ closure
         (emit op "mov %eax, ~a(%esp)" offset))
       (map calc-offset (iota argc))
       (cons fn args))
-    ;;; NOTE: It's easier to collect before entering variadic function.
-    (emit-walk-stack op argc (calc-offset argc) env)
-    (emit op "mov ~a(%esp), %eax" start-si)
-    (emit op "mov ~a(%eax), %eax" (- CLOS-TAG))
     (emit op "mov $~a, %ecx" argc)
-    (emit op "sub $~a, %esp" (- (abs si) WORDSIZE))
-    (emit op "call *%eax")
+    (match maybe-decl
+      ((label ,lbl)
+       (emit op "sub $~a, %esp" (- (abs si) WORDSIZE))
+       (emit op "call ~a" lbl))
+      (#f
+       (emit op "mov ~a(%esp), %eax" start-si)
+       (emit op "mov ~a(%eax), %eax" (- CLOS-TAG))
+       (emit op "sub $~a, %esp" (- (abs si) WORDSIZE))
+       (emit op "call *%eax"))
+      (,() (error "emit-call" "unmatch" maybe-decl)))
     (emit op "add $~a, %esp" (- (abs si) WORDSIZE))
-    (emit op "mov ~a(%esp), %ebp" (- WORDSIZE))
-    ))
+    (emit op "mov ~a(%esp), %ebp" (- WORDSIZE))))
 
 (define (emit-foreign-call op fn args si env)
   (let* ((args (reverse args))
@@ -586,6 +681,7 @@ closure
 (define (emit-L-apply op)
   (let ((loop (generate-label "unstack"))
         (end (generate-label "call")))
+    (emit op ".p2align 3")
     (emit op "L_apply: ")
     (emit op "mov ~a(%esp), %eax" (- (* 3 WORDSIZE)))
     (emit op "lea ~a(%esp), %edi" (- (* 3 WORDSIZE)))
@@ -635,7 +731,7 @@ closure
     (emit op "jge ~a" cont-cons)
     (emit-foreign-call op 's_proc_arg_err '() si (make-env))
     (emit op "~a: " cont-cons)
-
+    (emit-walk-stack op '%eax '%ecx (make-env))
     ;;;; counter
     ;;; ecx is arg-length/ length
     ;;; eax is accumulator
@@ -653,7 +749,7 @@ closure
     (emit op "cmp $~a, %ecx" argc)
     (emit op "jl ~a" end)
 
-    (emit op "mov free_ptr, %edi")
+    (emit op "mov (free_ptr), %edi")
     (emit op "addl $~a, (free_ptr)" (* 2 WORDSIZE))
     
     (emit op "mov %eax, ~a(%edi)" WORDSIZE)
@@ -672,52 +768,44 @@ closure
 (define (emit-procedure op fn params variadic? fvs body)
   (let* ((argc (length params))
          (calc-offset
-          (lambda (i) (format "mov ~a(%esp), %eax" (* (- WORDSIZE) (+ i 1)))))
-         (calc-free-offset
-          (lambda (i)
-            (format "mov ~a(%ebp), %eax"
-                    (- (* WORDSIZE (+ i 2)) CLOS-TAG))))
+          (lambda (i) (format "~a(%esp)" (* (- WORDSIZE) (+ i 1)))))
          (offsets (map calc-offset (iota argc)))
          (env (extend-env params offsets (make-env)))
-         (env (extend-env fvs (map calc-free-offset (iota (length fvs))) env))
          (si (* (- WORDSIZE) (+ argc 1))))
+    (emit op ".p2align 3")
     (emit op "~a: " fn)
     (emit op "sub $~a, %esp" WORDSIZE)
     (if (not variadic?)
         (let ((end (generate-label 'conseq)))
-          (emit op "cmp $~a, %ecx" (length params))
+          (emit op "cmp $~a, %ecx" argc)
           (emit op "je ~a" end)
           (emit-foreign-call op 's_proc_arg_err '() si env)
           (emit op "~a: " end))
         (emit-construct-vararg op argc si))
     (emit op "mov ~a(%esp), %ebp" (- WORDSIZE))
-    (emit-seq op body si env)
+    (emit-expr op body si env)
     (emit op "add $~a, %esp" WORDSIZE)
     (emit op "ret")))
 
 (define (emit-variadic-procedure op fn fvs clauses)
-  (let* ((calc-free-offset
-          (lambda (i)
-            (format "mov ~a(%esp), %eax\nmov ~a(%eax), %eax"
-                    (- (* WORDSIZE 2)) (- (* WORDSIZE (+ i 2)) CLOS-TAG))))
-         (env (extend-env fvs (map calc-free-offset (iota (length fvs))) (make-env)))
-         (si (- (* 3 WORDSIZE))))
+  (let* ((env (make-env)))
+    (emit op ".p2align 3")
     (emit op "~a: " fn)
+    (emit op "mov ~a(%esp), %ebp" (- (* WORDSIZE 2)))
     (for-each
       (lambda (clause)
         (match clause
-          ((,argc ,variadic? closure ,fn ,fvs)
+          ((closure ,fn ,fvs ,variadic? ,argc)
            (let ((next (generate-label "case_lambda_altern")))
-            
-            (if variadic?
-                (begin
-                  (emit op "cmp $~a, %ecx" (sub1 argc))
-                  (emit op "jl ~a" next))
-                (begin
-                  (emit op "cmp $~a, %ecx" argc)
-                  (emit op "jne ~a" next)))
+            (cond
+              (variadic?
+               (emit op "cmp $~a, %ecx" (sub1 argc))
+               (emit op "jl ~a" next))
+              (else
+               (emit op "cmp $~a, %ecx" argc)
+               (emit op "jne ~a" next)))
             (emit op "mov %ecx, %edx")
-            (emit-closure op fn fvs si env)
+            (emit-closure op fn fvs #f env)
             (emit op "mov %eax, ~a(%esp)" (- (* WORDSIZE 2)))
             (emit op "mov %edx, %ecx")
             (emit op "jmp ~a" fn)
@@ -728,7 +816,7 @@ closure
 
 (define (emit-closure op fn fvs si env)
   (define fvs-count (length fvs))
-  (emit op "mov free_ptr, %ecx")
+  (emit op "mov (free_ptr), %ecx")
   (emit op "addl $~a, (free_ptr)"
             (align-to-multiple 8 (* WORDSIZE (+ 2 fvs-count))))
   (emit op "mov $~a, %eax" fn)
@@ -736,7 +824,7 @@ closure
   (emit op "movl $~a, ~a(%ecx)" (immediate-rep fvs-count) WORDSIZE)
   (for-each
     (lambda (fv i)
-      (emit op (apply-env fv env))
+      (emit-expr op fv si env)
       (emit op "mov %eax, ~a(%ecx)"
               (* WORDSIZE (+ 2 i))))
     fvs
@@ -752,175 +840,174 @@ closure
     (,()
      (guard (string? e))
      (emit-str-lit op e si))
-    ('()
+    (,()
+     (guard (symbol? e))
+     (emit op "mov ~a, %eax" (apply-env e env)))
+    ((quote ())
      (emit op "mov $~a, %eax" (immediate-rep '())))
-    ((global ,lbl ,())
+    ((collect ,sz)
+     (emit-expr op sz si env)
+     (emit-walk-stack op '%eax si env))
+    ((global ,lbl)
      (emit op "mov ~a, %eax" lbl))
-    ((var ,x)
-     (emit op (apply-env x env)))
-    ((prim ,p)
-     (emit-prim op `(car (global ,(symbol->id-symbol p) ,p)) si env))
+    ((label ,lbl)
+     (emit op "mov ~a, %eax" lbl))
+    ((closure-ref ,() ,i)
+     (guard (integer? i))
+     (emit op "mov ~a(%ebp), %eax" (- (* WORDSIZE (+ i 2)) CLOS-TAG)))
     ((set-label! ,lbl ,e)
      (emit-expr op e si env)
      (emit op "mov %eax, ~a" lbl))
     ((begin . ,es)
-     (emit-seq op es si env))
-    ((let ,bindings . ,body)
+     (for-each
+      (lambda (e) (emit-expr op e si env))
+      es))
+    ((let ,bindings ,body)
      (emit-let op bindings body si env))
     ((if ,pred ,conseq ,altern)
      (emit-if op pred conseq altern si env))
     ((closure ,fn ,fvs)
-     (emit-walk-stack op (+ 2 (length fvs)) si env)
      (emit-closure op fn fvs si env))
-    ((prim-call . ,e)
-     (emit-prim op e si env))
-    ((call ,fn . ,es)
-     (emit-call op fn es si env))
+    ((call ,tail? (prim apply) ,fn ,es)
+     ((if tail? emit-tail-apply emit-apply) op fn es si env))
+    ((call ,() (prim ,pr) . ,es)
+     (emit-prim op (cons pr es) si env))
+    ((call ,tail? ,maybe-decl ,fn . ,es)
+     ((if tail? emit-tail-call emit-call) op maybe-decl fn es si env))
     ((foreign-call ,fn . ,es)
      (emit-foreign-call op fn es si env))
-    ((tail-call ,fn . ,es)
-     (emit-tail-call op fn es si env))
-    ((tail-apply ,fn ,es)
-     (emit-tail-apply op fn es si env))
-    ((apply ,fn ,es)
-     (emit-apply op fn es si env))
     (,() (error "emit-expr" "unmatch" e))))
-
-(define (emit-main op entry-name body env)
-  (emit op "~a:" entry-name)
-  (emit op "push %ebp")
-  (emit op "mov %esp, %ebp")
-  (emit-expr op body (- WORDSIZE) env)
-  (emit op "mov $0, %eax")
-  (emit op "pop %ebp")
-  (emit op "ret"))
-
-(define (emit-data op data)
-  (emit op ".section .data")
-  (for-each
-    (lambda (datum)
-     (match datum
-      (,x
-       (guard (symbol? x))
-       (emit op ".p2align 3")
-       (emit op "~a: .~abyte 0" x WORDSIZE))
-      (,() (error "emit-data" "unmatch" datum))))
-    data))
 
 (define (emit-code op entry-name prog)
   (match prog
-    ((program (labels . ,labels) (data . ,data) (unbounds . ,unbounds) . ,body)
-     (let* ((mov-label-txt (lambda (l) (format "mov ~a, %eax" l)))
-            (datum-labels (set-union data unbounds))
-            (env (extend-env datum-labels
-                             (map mov-label-txt datum-labels)
-                             (make-env))))
-      (for-each (lambda (g) (emit op ".extern ~a" g)) datum-labels)
-      (emit op ".extern L_apply")
-      (emit op ".section .text")
-      (emit op ".globl ~a" entry-name)
-      (for-each
-        (lambda (label)
-          (match label
-            ((,name (code ,params ,variadic? ,fvs . ,es))
-             (emit-procedure op name params variadic? fvs es))
-            ((,name (case-code ,fvs . ,clauses))
-             (emit-variadic-procedure op name fvs clauses))
-            (,() (error "emit-code" "unmatch" label))))
-        labels)
-      (emit-main op entry-name (cons 'begin body) env)))
+    ((program (labels . ,labels) (data . ,data) (unbounds . ,unbounds) ,body)
+     ;;; NOTE:
+     ;;; referenced operand position primitives are not externed here
+     ;;; but dont know what are the risk
+     (emit op ".globl ~a" entry-name)
+     (emit op ".extern L_apply")
+     (for-each (lambda (g) (emit op ".extern ~a" g)) (set-union data unbounds))
+     (emit op ".section .text")
+     (for-each
+       (lambda (label)
+         (match label
+           ((,name (code ,params ,variadic? ,fvs ,e))
+            (emit-procedure op name params variadic? fvs e))
+           ((,name (case-code ,fvs . ,clauses))
+            (emit-variadic-procedure op name fvs clauses))
+           (,() (error "emit-code" "unmatch" label))))
+       labels)
+     (emit op "~a:" entry-name)
+     (emit op "push %ebp")
+     (emit op "mov %esp, %ebp")
+     (emit-expr op body (- WORDSIZE) (make-env))
+     (emit op "mov $0, %eax")
+     (emit op "pop %ebp")
+     (emit op "ret"))
     (,() (error "emit-code" "unmatch" prog))))
 
 (define (program->data prog)
   (match prog
-    ((program (labels . ,()) (data . ,data) (unbounds . ,()) . ,()) data)
+    ((program (labels . ,()) (data . ,data) (unbounds . ,()) ,()) data)
     (,() (error "program->data" "unmatch" prog))))
 
-(define (emit-obj input-path output-path)
-  (define tmp-filename
-    (format "/tmp/scm-build/~a-~a.s"
-            (path-fileroot input-path)
-            (random-string 8)))
-  (system "mkdir -p /tmp/scm-build")
-  (system* "rm -f ~a" tmp-filename)
-  (let* ((prog
-          (preprocess
-            (list (lambda (path)
-                    (cons 'begin (read-sexps-from-path input-path)))
-                  uniquify-program
-                  lift-symbol-program
-                  convert-assignment-program
-                  explicate-program
-                  uncover-free-program
-                  reveal-function-program)
-            input-path))
+(define (emit-obj input-path output-path k)
+  (define tmp-filename (mk-tmpname (path-fileroot input-path) "s"))
+  (let* ((prog (preprocess (cons 'begin (read-sexps-from-path input-path))))
          (entry-name (format "~a.main" (string->id-string (path-fileroot input-path))))
          (data (program->data prog))
          (op (open-output-file tmp-filename)))
     (emit-code op entry-name prog)
     (close-output-port op)
-    (system* "gcc -fomit-frame-pointer -m32 -c ~a -o ~a"
+    #;
+    (system* "gcc -fno-omit-frame-pointer -m32 -c ~a -o ~a"
              tmp-filename output-path)
+    (system* "as --32 -o ~a ~a" output-path tmp-filename)
     (system* "rm -f ~a" tmp-filename)
-    (system* "objcopy --add-section .main_entry=<(echo ~s) ~a"
-             (format "~s" (list (list entry-name) data))
-             output-path)))
+    (k entry-name data)))
 
-(define (read-meta obj-filenames)
-  (define (read-meta obj-file)
-    (let* ((filename (format "/tmp/scm-build/~a.txt" (random-string 8)))
-           (_ (system* "objcopy --dump-section .main_entry=~a ~a"
-                       filename obj-file))
-           (inp (open-input-file filename))
-           (meta (read inp)))
-      (close-port inp)
-      meta))
-  (define metas (map read-meta obj-filenames))
+(define (read-meta obj-file)
+  (let* ((filename (mk-tmpname "read-meta" "txt"))
+          (_ (system* "objcopy --dump-section .main_entry=~a ~a"
+                      filename obj-file))
+          (inp (open-input-file filename))
+          (meta (read inp)))
+    (close-port inp)
+    (system* "rm -f ~a" filename)
+    meta))
+
+(define (map3-k f xs k)
+  (let recur ((xs xs) (k k))
+    (if (not (pair? xs))
+        (k '() '() '())
+        (f (car xs)
+          (lambda (x y z)
+            (recur (cdr xs)
+              (lambda (xs ys zs)
+                (k (cons x xs) (cons y ys) (cons z zs)))))))))
+
+(define (mk-tmpname f ext)
+  (format "/dev/shm/scm-build-~a-~a.~a" (path-fileroot f) (random-string 8) ext))
+
+(define (emit-objs input-paths k)
+  (map3-k
+    (lambda (i k)
+      (if (equal? (path-extension i) "o")
+          (let ((out (mk-tmpname i "o")))
+            (system* "cp ~a ~a" i out)
+            (k out (read-meta out) (lambda () (system* "rm -f ~a" out))))
+          (let ((out (mk-tmpname i "o")))
+            (emit-obj i out
+              (lambda (entry-name data) (k out (list (list entry-name) data) (lambda () (system* "rm -f ~a" out))))))))
+    input-paths
+    k))
+
+(define (combine-objs output-path objs metas)
   (define entries (apply append (map car metas)))
   (define globals (apply set-union (map cadr metas)))
-  (list entries globals))
-
-(define (emit-objs input-paths)
- (system "mkdir -p /tmp/scm-build/")
- (map
-    (lambda (i)
-      (if (equal? (path-extension i) "o")
-          i
-          (let ((out
-                 (format "/tmp/scm-build/~a-~a.o" (path-fileroot i) (random-string 8))))
-            (emit-obj i out)
-            out)))
-    input-paths))
-
-(define (combine-objs output-path . objs)
-  (define meta (read-meta objs))
-  (define entries (car meta))
-  (define globals (cadr meta))
+  #;
   (system* "gcc -m32 -r -o ~a ~a"
            output-path
            (apply string-append
                   (map (lambda (s) (string-append " \"" s "\" ")) objs)))
-  (system* "objcopy --update-section .main_entry=<(echo ~s) ~a"
+  (system* "ld -m elf_i386 -r -o ~a ~a"
+           output-path
+           (apply string-append
+                  (map (lambda (s) (string-append " \"" s "\" ")) objs)))
+  (system* "objcopy --remove-section=.main_entry --add-section .main_entry=<(echo ~s) ~a"
            (format "~s" (list entries globals))
            output-path))
 
-(define (linking-to-exe output-path . objs)
-  (define meta (read-meta objs))
-  (define entries (car meta))
-  (define globals (cadr meta))
-  (define tmp-filename
-    (format "/tmp/scm-build/~a-~a.s"
-            (path-fileroot output-path)
-            (random-string 8)))
-  (system* "rm -f ~a" tmp-filename)
+(define (linking-to-exe output-path objs metas)
+  (define (make-prim-call pr . es)
+    `(call #f (prim ,pr) . ,es))
+  (define (make-box-init e)
+    (make-prim-call 'cons e '(quote ())))
+  (define entries (apply append (map car metas)))
+  (define globals (apply set-union (map cadr metas)))
+  (define tmp-filename (mk-tmpname (path-fileroot output-path) "s"))
   (let* ((op (open-output-file tmp-filename)))
-    (emit-data op globals)
-    (emit op ".section .text")
     (emit op ".globl main")
     (emit op ".globl L_apply")
+    (for-each (lambda (g) (emit op ".globl ~a" g)) globals)
+
+    (emit op ".section .data")
+    (emit op ".globl global_table")
+    (emit op "global_table:")
     (for-each
-      (lambda (g) (emit op ".globl ~a" g))
+      (lambda (g) (emit op ".~abyte ~a" WORDSIZE g))
       globals)
+    (emit op ".~abyte 0" WORDSIZE)
+    (for-each
+      (lambda (g)
+      (match g
+        (,()
+         (guard (symbol? g))
+         (emit op ".p2align 3")
+         (emit op "~a: .~abyte 0" g WORDSIZE))
+        (,() (error "linking-to-exe" "unmatch" g))))
+      globals)
+    (emit op ".section .text")
     (emit-L-apply op)
     (emit op "main:")
     (emit op "mov %esp, BOT_EBP")
@@ -932,11 +1019,7 @@ closure
     (emit op "call init_heap")
     (for-each
       (lambda (g)
-        (emit-expr op `(set-label! ,g (prim-call cons 0 '())) (- WORDSIZE) #f)
-        (emit op "mov $~a, %eax" g)
-        (emit op "mov GLOBALS, %ecx")
-        (emit op "mov %eax, (%ecx)")
-        (emit op "addl $~a, GLOBALS" WORDSIZE))
+        (emit-expr op `(set-label! ,g ,(make-box-init 0)) (- WORDSIZE) #f))
       globals)
     (for-each
       (lambda (entry) (emit op "call ~a" entry))
@@ -944,7 +1027,7 @@ closure
     (emit op "mov $0, %eax")
     (emit op "ret")
     (close-output-port op))
-  (system* "gcc -fomit-frame-pointer -m32 ~a ~a runtime.o -o ~a"
+  (system* "gcc -fno-omit-frame-pointer -m32 ~a ~a runtime.o -o ~a"
            tmp-filename
            (apply string-append
                   (map (lambda (s) (string-append " \"" s "\" ")) objs))
@@ -952,10 +1035,20 @@ closure
   (system* "rm -f ~a" tmp-filename))
 
 (match (cdr (command-line))
-  (("--combine" ,output-path . ,input-paths)
-   (apply combine-objs (cons output-path (emit-objs input-paths))))
   (("-o" ,output-path . ,input-paths)
-   (apply linking-to-exe (cons output-path (emit-objs input-paths))))
+   (emit-objs input-paths
+    (lambda (objs metas frees)
+      ((if (equal? (path-extension output-path) "o") combine-objs linking-to-exe) output-path objs metas)
+      (map (lambda (f) (f)) frees))))
   (("--make-prim-lib" ,output-path)
    (write-primitive-lib output-path))
-  (,cmd-ln (error "compiler.scm" "unmatch" cmd-ln)))
+  (,input-paths
+   (emit-objs input-paths
+    (lambda (objs metas frees)
+      (let ((output-path (mk-tmpname "tmp" "out")))
+        (linking-to-exe output-path objs metas)
+        (system* output-path)
+        (system* "rm -f ~a" output-path)
+        (map (lambda (f) (f)) frees)))))
+  (,cmd-ln (error (car (command-line)) "unmatch" cmd-ln)))
+)
