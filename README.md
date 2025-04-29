@@ -1,13 +1,28 @@
 # About
-This repository contains a compiler that translates Scheme code into x86 machine code
-(specifically, 32-bit x86 or the 32-bit subset of x86_64).
+This repository contains a self-hosting compiler that translates Scheme code into native code.
 The compiler itself is implemented in Scheme.
 
 It supports self-hosting: it can compile its own source code.
-The resulting binary (let's call it compiler-compiler.out) is fully functional and capable of recompiling the compiler source code again.
+The resulting binary (let's call it `compiler-0.out`) is fully functional and capable of recompiling the compiler source code again.
 This bootstrapped compiler passes all provided test cases.
 
+# Naming Convention for scheme compiler
+- `compiler.out` – Legacy compiler used before the introduction of ANF IR.
+- `compiler-i686.out` – Targets the 32-bit variant of the x86_64 architecture.
+- `compiler-x86_64.out` – Targets the 64-bit variant of the x86_64 architecture.
+- `compiler-<host>-<target>.out` – Runs on the host architecture and generates code for the specified target architecture.
+- `compiler-<host=target>.out` – Runs on and generates code for the same architecture.
+
 # Changelog
+## 2025-04-30
+- Support x86-64 target
+- Cross compilation between x86 and x64
+- ANF IR and naive linear temporary allocation
+- Inline GC check
+- allocation pointer is stored in register
+- Faster `gensym`
+- Simple known call optimization
+
 ## 2025-04-08
 - Use `make` to do compilation and testing
 - Support for concurrent compilation and testing.
@@ -40,7 +55,7 @@ I've made the tail apply work properly. In addition, I add primitive case lambda
 
 # Prerequisite to run the compiler
 - x86_64
-- Fedora OS
+- Fedora OS / Fedora WSL / docker
 - installed gcc (default only install 64bits)
 - installed 32bits gcc compiler for x86_64
 - installed chez scheme
@@ -49,11 +64,12 @@ I've made the tail apply work properly. In addition, I add primitive case lambda
 
 # How to compile
 ```bash
-make lib.o runtime.o -j
+source activate.sh
+make make-lib runtime.o TARGET_ARCH=x86-64 SCM_CC="./compiler-x86_64.out" -j
 # to run
-./compiler.out lib.o test/test-unary.scm
+./compiler-x86_64.out lib64.o test/test-unary.scm
 # to compile and run
-./compiler.out -o a.out lib.o test/test-unary.scm
+./compiler-x86_64.out -o a.out lib64.o test/test-unary.scm
 ./a.out
 ```
 
