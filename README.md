@@ -6,8 +6,38 @@ It supports self-hosting: it can compile its own source code.
 The resulting binary (let's call it `compiler-0.out`) is fully functional and capable of recompiling the compiler source code again.
 This bootstrapped compiler passes all provided test cases.
 
+
+# Prerequisite to run the compiler
+- x86_64 CPU
+- Fedora OS, or Fedora WSL, https://docs.fedoraproject.org/en-US/cloud/wsl/
+- Installing dependecies (refer to dockerfile)
+
+# How to run
+```bash
+source activate.sh
+make make-lib runtime.o TARGET_ARCH=x86-64 SCM_CC="./compiler-x86_64.out" -j
+# to run
+./compiler-x86_64.out lib64.o test/test-unary.scm
+# to compile and run
+./compiler-x86_64.out -o a.out lib64.o test/test-unary.scm
+./a.out
+# run the test
+sh run-test.sh
+```
+
+# Features used/supported
+- pair-based pattern matcher
+- Garbage collector
+- C-FFI
+- fixnum, ascii characters, boolean, vector, string, symbol, closure
+- assignment
+- tail call
+- seperate compilation
+- primitives are value procedures when occurs in operand position
+- variadic procedure, primitive case lambda, apply, tail call apply
+
 # Naming Convention for scheme compiler
-- `compiler.out` – Legacy compiler used before the introduction of ANF IR.
+- `compiler.out` – Legacy x86 compiler used before the introduction of ANF IR.
 - `compiler-i686.out` – Targets the 32-bit variant of the x86_64 architecture.
 - `compiler-x86_64.out` – Targets the 64-bit variant of the x86_64 architecture.
 - `compiler-<host>-<target>.out` – Runs on the host architecture and generates code for the specified target architecture.
@@ -52,43 +82,6 @@ but the frame address is pushed by caller to the same position (after the return
 Since `ebp` is free, I use it as closure pointer.
 
 I've made the tail apply work properly. In addition, I add primitive case lambda.
-
-# Prerequisite to run the compiler
-- x86_64
-- Fedora OS / Fedora WSL / docker
-- installed gcc (default only install 64bits)
-- installed 32bits gcc compiler for x86_64
-- installed chez scheme
-  - if you want to run the test
-  - if you want to use scheme implementation other than the `compiler.out`
-
-# How to compile
-```bash
-source activate.sh
-make make-lib runtime.o TARGET_ARCH=x86-64 SCM_CC="./compiler-x86_64.out" -j
-# to run
-./compiler-x86_64.out lib64.o test/test-unary.scm
-# to compile and run
-./compiler-x86_64.out -o a.out lib64.o test/test-unary.scm
-./a.out
-```
-
-# Run the test
-
-```bash
-sh run-test.sh
-```
-
-# Features used/supported
-- pair-based pattern matcher
-- Garbage collector
-- C-FFI
-- fixnum, ascii characters, boolean, vector, string, symbol, closure
-- assignment
-- tail call
-- seperate compilation
-- primitives are value procedures when occurs in operand position
-- variadic procedure, primitive case lambda, apply, tail call apply
 
 # Data Representation
 ## Memory Layout
