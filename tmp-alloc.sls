@@ -1,5 +1,5 @@
 (library
-  (regalloc)
+  (tmp-alloc)
   (export
     assign-home-program
     lower-let-program)
