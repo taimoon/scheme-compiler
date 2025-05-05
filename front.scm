@@ -1281,50 +1281,27 @@ This is to ease expose-alloc pass.
 (define (apply-passes prog . passes)
   (fold-left (lambda (prog f) (f prog)) prog passes))
 
-(define (trace-pass name)
-  (lambda (e) (format #t "~a:\n" name) (pretty-print e) e))
-
 (define (preprocess prog)
   (apply-passes
     prog
-    (trace-pass 'prog)
     uniquify-program
-    (trace-pass 'uniquify-program)
     lift-quote-program
-    (trace-pass 'lift-quote-program)
     lift-symbol-program
-    (trace-pass 'lift-symbol-program)
     constant-folding-program
-    (trace-pass 'constant-folding-program)
     purify-letrec-program
-    (trace-pass 'purify-letrec-program)
     optimize-known-call-program
-    (trace-pass 'optimize-known-call-program)
     convert-letrec-program
-    (trace-pass 'convert-letrec-program)
     convert-assignment-program
-    (trace-pass 'convert-assignment-program)
     uncover-free-program
-    (trace-pass 'uncover-free-program)
     convert-closure-program
-    (trace-pass 'convert-closure-program)
     reveal-function-program
-    (trace-pass 'reveal-function-program)
     expand-operand-prim-program
-    (trace-pass 'expand-operand-prim-program)
     remove-complex-operand-program
-    (trace-pass 'remove-complex-operand-program)
     expose-alloc-program
-    (trace-pass 'expose-alloc-program)
     anf-of-program
-    (trace-pass 'anf-of-program)
     sequentialize-program
-    (trace-pass 'sequentialize-program)
     explicate-program
-    (trace-pass 'explicate-program)
     assign-home-program
-    (trace-pass 'assign-home-program)
     lower-let-program
-    (trace-pass 'lower-let-program)
     ))
 preprocess))
