@@ -172,21 +172,33 @@
 
 ;;; vector
 (define (vector-equal? v w)
-  (and (eq? v w)
-       (eq? (vector-length v)
-            (vector-length w))
-    (let loop ((i 0))
-      (if (>= i (vector-length v))
-          #t
-          (and
-            (equal? (vector-ref v i) (vector-ref w i))
-            (loop (add1 i)))))))
+  (cond
+    ((eq? v w) #t)
+    ((not (eq? (vector-length v) (vector-length w))) #f)
+    (else
+      (let loop ((i 0))
+        (if (>= i (vector-length v))
+            #t
+            (and
+              (equal? (vector-ref v i) (vector-ref w i))
+              (loop (add1 i))))))))
+
+(define (vector-fold-left f init v)
+  (let iter ((i 0)
+             (init init))
+    (if (>= i (vector-length v))
+        init
+        (iter (+ 1 i) (f init (vector-ref v i))))))
+
+(define (vector-fold-right f init v)
+  (let iter ((i (- (vector-length v) 1))
+             (init init))
+    (if (< i 0)
+        init
+        (iter (- i 1) (f (vector-ref v i) init)))))
 
 (define (vector->list v)
-  (let recur ((i 0))
-    (if (= i (vector-length v))
-        '()
-        (cons (vector-ref v i) (recur (add1 i))))))
+  (vector-fold-right cons '() v))
 
 (define (list->vector xs)
   (let recur ((xs xs) (sz 0))
@@ -418,38 +430,3 @@
         ((and (string? x) (string? y))
          (string=? x y))
         (else #f)))
-
-(define gensym
-  (let ()
-    (define (make-lcg multiplier increment modulus x)
-      (lambda ()
-        (set! x (mod (+ increment (* multiplier x)) modulus))
-        x))
-
-    (define (random-bool)
-      (= (mod (rand) 2) (mod (rand) 2)))
-
-    (define (random-string len)
-      (let loop ((s (make-string len #\nul))
-                (i (- len 1)))
-        (if (< i 0)
-            s
-            (begin
-              (string-set! s i (integer->char
-                                (+ (if (random-bool) 97 65)
-                                   (mod (rand) 26))))
-              (loop s (- i 1))))))
-
-    (define rand
-      (make-lcg 75 74 (+ (ash 2 16) 1) (get-process-id)))
-
-    (let ((x 0)
-          (rdm-str (random-string 4)))
-      (case-lambda
-        (()
-        (gensym "g"))
-        ((prefix)
-        (let ((str (string-append prefix rdm-str (number->string x))))
-            (set! x (add1 x))
-            (set! SYMBOL-STR-TABLE (cons str SYMBOL-STR-TABLE))
-            (%string->symbol str)))))))

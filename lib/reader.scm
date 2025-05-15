@@ -4,7 +4,7 @@
 (define (memq? x s)
   (if (memq x s) #t #f))
 
-(define str-buf (make-string 512 #\nul))
+(define str-buf (make-string 512))
 
 (define (%next-token p)
   #|
@@ -56,22 +56,23 @@
       (list #\r (integer->char 13)) ; #\return
       (list #\\ #\\)
     ))
-  (let loop ([i 0] [c (read-char p)])
+  (let loop ([i 0] [c (read-char p)] [acm '()])
     (cond 
       [(eof-object? c) (error 'read-quote-delimited-string 'open-string c)]
+      [(eq? c #\")
+       (apply string-append (reverse (cons (substring str-buf 0 i) acm)))]
       [(eq? c #\\)
        (let* ((c (read-char p))
               (esc-c (assq c %escaped-string-element)))
           (if esc-c
               (string-set! str-buf i (cadr esc-c))
               (error "unknown escape character" c))
-          (loop (add1 i) (read-char p)))]
-      [(eq? c #\") (substring str-buf 0 i)]
-      [(or (char-whitespace? c)
-           (char? c))
+          (loop (add1 i) (read-char p) acm))]
+      [(>= i (string-length str-buf))
+       (loop 0 c (cons (substring str-buf 0 i) acm))]
+      [else
        (string-set! str-buf i c)
-       (loop (add1 i) (read-char p))]
-      [else (error 'read-quote-delimited-string 'unknown:lexeme c)])))
+       (loop (add1 i) (read-char p) acm)])))
 
 (define (read-comment p)
   (let loop ([c (read-char p)])
@@ -197,19 +198,19 @@
   (let ([buf '()])
     (lambda (msg)
       (cond
-        ((eq? msg 'peek)
+        [(eq? msg 'peek)
          (if (pair? buf)
              (car buf)
              (let ([res (%next-token p)])
               (set! buf (list res))
-              res)))
-        ((eq? msg 'next)
+              res))]
+        [(eq? msg 'next)
          (if (pair? buf)
              (let ([res (car buf)])
               (set! buf '())
               res)
-             (%next-token p)))
-        (else (error 'tokenizer "unknown msg" msg))))))
+             (%next-token p))]
+        [else (error 'tokenizer "unknown msg" msg)]))))
 
 (define (tokenizer-next tk) (tk 'next))
 

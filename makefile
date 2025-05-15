@@ -148,7 +148,7 @@ bootstrap-test:
 	##########################################################################################
 	rm -f /dev/shm/scm-build*
 
-.PHONY: cross-compile
+.PHONY: cross-compile-test
 cross-compile-test:
 	make rebuild-clean
 	time (make new-compiler \

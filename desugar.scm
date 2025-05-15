@@ -254,14 +254,17 @@
   `(call (prim ,pr) . ,es))
 
 (define (checked-make-vector uniquify es env)
-  (define (insert-check sz)
+  (define (insert-check sz obj)
     `(if ,(make-prim-call 'integer? sz)
-         ,(make-prim-call 'make-vector sz)
+         ,(make-prim-call 'make-vector sz obj)
          (foreign-call s_make_vector_size_err ,sz)))
   (match es
     ((,sz)
      (intro-name (uniquify sz env)
-                 (lambda (sz) (insert-check sz))))
+                 (lambda (sz) (insert-check sz 0))))
+    ((,sz ,obj)
+     (intro-name (uniquify sz env)
+                 (lambda (sz) (insert-check sz (uniquify obj env)))))
     (,es
      (error "uniquify" "make-vector:unknown-args" es))))
 

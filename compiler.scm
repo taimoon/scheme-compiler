@@ -62,7 +62,7 @@
 (define (emit-eax=? op v)
   (emit op "cmp $~a, %eax" v)
   (emit op "sete %al")
-  (emit op "sal $~a, %eax" IMM-MASK)
+  (emit op "sal $~a, %eax" IMM-SHIFT)
   (emit op "or $~a, %eax" BOOL-TAG))
 
 (define suffix-cmp
@@ -147,7 +147,6 @@
     ((%walk-stack ,e)
      (emit-walk-stack op e si env))
     ((align-to-multiple 8 ,e)
-     (emit-expr op e si env)
      (emit-simple op e '%eax)
      (emit op "add $~a, %eax" (immediate-rep (- 8 1)))
      (emit op "and $~a, %eax" (immediate-rep -8)))
@@ -320,9 +319,9 @@
     ((vector-length ,e)
      (emit-simple op e '%eax)
      (emit op "mov ~a(%eax), %eax" (- VEC-TAG)))
-    ((make-vector ,sz)
+    ((make-vector ,sz ,obj)
      (emit op "mov ~a, (free_ptr)" AP-REG)
-     (emit-foreign-call op 's_make_vector (list sz) si env)
+     (emit-foreign-call op 's_make_vector (list sz obj) si env)
      (emit op "mov (free_ptr), ~a" AP-REG))
     ((vector-ref ,v ,i)
      (emit-simple op i '%ecx)

@@ -1,4 +1,7 @@
 (import
+  (rename (chezscheme)
+    (fxarithmetic-shift-left ashl)
+    (fxarithmetic-shift-right ashr))
   (only (match) match)
   (only (set) make-set set-union set-diff)
   (only (desugar)
@@ -244,6 +247,8 @@
     (procedure? ,procedure?)
     (bitwise-ior ,bitwise-ior)
     (bitwise-and ,bitwise-and)
+    (ashl ,ashl)
+    (ashr ,ashr)
     ))
 
 (define non-foldable-primitives

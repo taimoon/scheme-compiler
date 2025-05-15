@@ -23,6 +23,8 @@ typedef intptr_t* ptr_t;
 #define CHAR_TAG        0b00001111
 #define BOOL_TAG        0b00011111
 #define NIL_TAG         0b00111111
+#define EMPTY_TAG       0b11111111
+#define EMPTY           (word_t)-1
 #define PTR_MASK        0b00000111
 #define PAIR_TAG        0b00000001
 #define VEC_TAG         0b00000010
@@ -36,11 +38,7 @@ int ARGC;
 char **ARGV;
 word_t ARGS;
 extern word_t* global_table[];
-typedef struct GC_CELL_T {
-    word_t obj;
-    bool is_deleted;
-} GC_CELL_T;
-GC_CELL_T *GC_CELLS;
+word_t *GC_CELLS;
 word_t *BOT_EBP;
 
 inline static word_t align_to_multiple(word_t alignment, word_t offset){
@@ -80,7 +78,7 @@ void init_heap(){
         HEAP_SIZE = 0xffff8;    // 15 MB
         // HEAP_SIZE = 0x8ffff8;   // 150 MB
     }
-    GC_CELLS = aligned_alloc(AVX_ALIGNMENT, HEAP_SIZE * sizeof(GC_CELL_T));
+    GC_CELLS = aligned_alloc(AVX_ALIGNMENT, HEAP_SIZE * sizeof(word_t));
     free_ptr = aligned_alloc(AVX_ALIGNMENT, HEAP_SIZE * 2 * sizeof(word_t*));
     
     // double estimated_mem_sz = (HEAP_SIZE * (2 * sizeof(word_t*) + sizeof(GC_CELL_T))) / (1024 * 1024);
@@ -343,9 +341,7 @@ word_t s_make_string(word_t size, word_t ch){
     word_t res = (word_t)free_ptr | STR_TAG;
     free_ptr[0] = size;
     char *d = (char*)(free_ptr + 1);
-    for(int i = 0; i < k; ++i){
-        d[i] = c;
-    }
+    memset(d, c, k);
     d[k] = '\0';
     free_ptr = free_ptr + 1;
     free_ptr = (word_t*)((char*)free_ptr + k + 1);
@@ -353,7 +349,7 @@ word_t s_make_string(word_t size, word_t ch){
     return res;
 }
 
-word_t s_make_vector(word_t size){
+word_t s_make_vector(word_t size, word_t obj){
     assert((size & FIXNUM_MASK) == FIXNUM_TAG);
     int k = size >> FIXNUM_SHIFT;
     assert(k >= 0);
@@ -361,11 +357,10 @@ word_t s_make_vector(word_t size){
     word_t res = (word_t)free_ptr | VEC_TAG;
     free_ptr[0] = size;
     for(int i = 0; i < k; ++i){
-        free_ptr[i+1] = 0;
+        free_ptr[i+1] = obj;
     }
     free_ptr = (word_t*)align_to_multiple(8,(word_t)(free_ptr + k + 1));
     return res;
-
 }
 
 // GC
@@ -397,8 +392,8 @@ word_t copy_obj(word_t v){
         word_t w = copy_obj(v - SYM_TAG + STR_TAG) - STR_TAG + SYM_TAG;
         return w;
     }
-    if(GC_CELLS[pos].is_deleted){
-        return GC_CELLS[pos].obj;
+    if(GC_CELLS[pos] != EMPTY){
+        return GC_CELLS[pos];
     }
     else if((v & PTR_MASK) == PAIR_TAG){
         word_t *w = free_ptr;
@@ -406,10 +401,9 @@ word_t copy_obj(word_t v){
         w[0] = ptr[0];
         w[1] = ptr[1];
 
-        GC_CELLS[pos].obj = ((word_t)w) | PAIR_TAG;
-        GC_CELLS[pos].is_deleted = true;
-        *--scan_ptr = GC_CELLS[pos].obj;
-        return GC_CELLS[pos].obj;
+        GC_CELLS[pos] = ((word_t)w) | PAIR_TAG;
+        *--scan_ptr = GC_CELLS[pos];
+        return GC_CELLS[pos];
     }
     else if((v & PTR_MASK) == STR_TAG){
         word_t *ptr = (word_t*)(v - STR_TAG);
@@ -430,9 +424,8 @@ word_t copy_obj(word_t v){
 
         strncpy(d, s, len+1);
 
-        GC_CELLS[pos].obj = (word_t)w | STR_TAG;
-        GC_CELLS[pos].is_deleted = true;
-        return GC_CELLS[pos].obj;
+        GC_CELLS[pos] = (word_t)w | STR_TAG;
+        return GC_CELLS[pos];
     }
     else if((v & PTR_MASK) == SYM_TAG){
         word_t w = copy_obj(v - SYM_TAG + STR_TAG) - STR_TAG + SYM_TAG;
@@ -453,10 +446,9 @@ word_t copy_obj(word_t v){
         for(int i = 0; i < len+1; ++i){
             w[i] = ptr[i];
         }
-        GC_CELLS[pos].obj = (word_t)w | VEC_TAG;
-        GC_CELLS[pos].is_deleted = true;
-        *--scan_ptr = GC_CELLS[pos].obj;
-        return GC_CELLS[pos].obj;
+        GC_CELLS[pos] = (word_t)w | VEC_TAG;
+        *--scan_ptr = GC_CELLS[pos];
+        return GC_CELLS[pos];
     }
     else if((v & PTR_MASK) == CLOS_TAG){
         word_t *ptr = (word_t*)(v - CLOS_TAG);
@@ -473,10 +465,9 @@ word_t copy_obj(word_t v){
         for(int i = 0; i < len + 2; ++i){
             dest[i] = ptr[i];
         }
-        GC_CELLS[pos].obj = (word_t)dest | CLOS_TAG;
-        GC_CELLS[pos].is_deleted = true;
-        *--scan_ptr = GC_CELLS[pos].obj;
-        return GC_CELLS[pos].obj;
+        GC_CELLS[pos] = (word_t)dest | CLOS_TAG;
+        *--scan_ptr = GC_CELLS[pos];
+        return GC_CELLS[pos];
     }
     else {
         fprintf(stderr, "%s unknown object %p\n", __FUNCTION__, v);
@@ -551,7 +542,7 @@ word_t gc_flip(word_t fx_size, word_t *esp, word_t *ebp){
     free_ptr = fromspace_start;
     scan_ptr = fromspace_end;
 
-    memset(GC_CELLS, 0, HEAP_SIZE * sizeof(GC_CELLS[0]));
+    memset(GC_CELLS, EMPTY, HEAP_SIZE * sizeof(GC_CELLS[0]));
 
     ARGS = copy_obj(ARGS);
     for(int i = 0; global_table[i] != 0; ++i) {
