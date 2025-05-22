@@ -31,6 +31,8 @@
 (cons x y)
 (car p)
 (cdr p)
+set-car!
+set-cdr!
 (define list (lambda x x))
 (define list*
   (lambda (x . xs)

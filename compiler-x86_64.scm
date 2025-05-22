@@ -8,9 +8,35 @@
     read-sexps-from-path align-to-multiple
     random-string symbol->id-symbol string->id-string generate-label
     system*
-    path-fileroot path-filename))
+    path-fileroot path-filename mk-tmpname))
 
 (let ()
+;;; NOTE: the parameter `si` is at -8 from 16-byte aligned stack pointer, holding the return address.
+#;(x86
+sp always points top value and not the free cell
+(... ra fp/sp arg-0/clos arg-1 ... arg-n local-0 ... n)
+; procedure - n = #local + #arg
+(...
+  ra      1
+  fp/sp   0    (aligned at 16 bytes)
+  clos    -1
+  arg-1   -2
+  ...
+  arg-i   -(2+i)
+  si      -(2+n)
+  )
+; file entry - n = #local
+(...
+  ra     1
+  fp/sp  0    (aligned at 16 bytes)
+  clos   -1
+  lcl-0  -2
+  ...
+  lcl-i  -(2+i)
+  si     -(2+n)
+  )
+)
+
 (define REGISTERS '(%rdi %rsi %rdx %rcx %r8 %r9))
 (define FIXNUM-MASK   #b00000111)
 (define FIXNUM-TAG    #b00000000)
@@ -31,12 +57,15 @@
 (define SYM-TAG       #b00000101)
 (define CLOS-TAG      #b00000110)
 (define GC-CTX-MIN-SIZE 64)
+(define (maybe-getenv name default)
+  (let ((val (getenv name)))
+    (if val val default)))
 (define CC "gcc")
 (define CC-ARGS "-g -fno-omit-frame-pointer -m64 -march=x86-64")
-
+(define OBJCOPY (maybe-getenv "OBJCOPY" "objcopy"))
 (define WORDSIZE 8)
-(define CLOS-REG "%r12")
-(define AP-REG "%r13")
+(define CLOS-REG '%r12)
+(define AP-REG '%r13)
 
 ;;; emit
 (define (emit op . args)
@@ -89,7 +118,6 @@
     (emit-expr op pred si env)
     (emit op "cmp $~a, %rax" FALSE-IMM)
     (emit op "je ~a" altern-label)
-    ;;; NOTE: for debugging purpose
     (emit op "~a :" (generate-label "conseq"))
     (emit-expr op conseq si env)
     (emit op "jmp ~a" end-label)
@@ -262,12 +290,12 @@
      (emit-simple op e '%rax)
      (emit op "and $~a, %rax" PTR-MASK)
      (emit-eax=? op PAIR-TAG))
-    ((cons ,simp1 ,simp2)
+    ((cons ,e1 ,e2)
      (emit op "mov ~a, %rcx" AP-REG)
      (emit op "add $~a, ~a" (* 2 WORDSIZE) AP-REG)
-     (emit-expr op simp2 si env)
+     (emit-simple op e2 '%rax)
      (emit op "mov %rax, ~a(%rcx)" WORDSIZE)
-     (emit-expr op simp1 si env)
+     (emit-simple op e1 '%rax)
      (emit op "mov %rax, (%rcx)")
      (emit op "mov %rcx, %rax")
      (emit op "or $~a, %rax" PAIR-TAG))
@@ -362,14 +390,12 @@
   ;;; gc_flip(word_t fx_size, word_t *esp, word_t *ebp)
   (define (emit-call-gc-flip)
     (emit op "mov ~a, (free_ptr)" AP-REG)
-     (emit op "mov %rsp, %rbx")
-     (emit op "mov %rax, %rdi") ; fx_size
-     (emit op "lea ~a(%rsp), %rsi" (- (- (abs si) WORDSIZE)))  ; store the stack pointer, esp
-     (emit op "mov %rsp, %rdx")                                ; store the frame pointer, ebp
+     (emit op "mov %rax, ~a" (car REGISTERS)) ; fx_size
+     (emit op "lea ~a(%rsp), ~a" (- (- (abs si) WORDSIZE)) (cadr REGISTERS))   ; store the stack pointer, esp
+     (emit op "mov %rsp, ~a" (caddr REGISTERS))                                ; store the frame pointer, ebp
      (emit op "sub $~a, %rsp" (- (abs si) WORDSIZE))           ; substract esp
-     (emit op "and $-16, %rsp")
      (emit op "call gc_flip")
-     (emit op "mov %rbx, %rsp")
+     (emit op "add $~a, %rsp" (- (abs si) WORDSIZE))
      (emit op "mov (free_ptr), ~a" AP-REG)
      ;;; NOTE: Restore back the closure pointer after GC
      (emit op "mov ~a(%rsp), ~a" (- WORDSIZE) CLOS-REG))
@@ -431,8 +457,9 @@
   (let* ((argc (length (cons fn args)))
          (start-si (- si (* 2 WORDSIZE)))
          (calc-offset (lambda (i) (- start-si (* WORDSIZE i)))))
+    ;;; placeholder for return address
     (emit op "movq $0, ~a(%rsp)" si)
-    ;;; this store the frame pointer
+    ;;; store the frame pointer
     (emit op "movq %rsp, ~a(%rsp)" (- si WORDSIZE))
     (for-each
       (lambda (offset arg)
@@ -462,11 +489,9 @@
           (begin
             (emit-simple op (car args) (car regs))
             (loop (cdr args) (cdr regs)))))
-    (emit op "mov %rsp, %rbx")
-    (emit op "sub $~a, %rsp" (abs end-si))
-    (emit op "and $-16, %rsp")
+    (emit op "sub $~a, %rsp" (- (abs end-si) WORDSIZE))
     (emit op "call ~a" fn)
-    (emit op "mov %rbx, %rsp")))
+    (emit op "add $~a, %rsp" (- (abs end-si) WORDSIZE))))
 
 (define (emit-tail-apply op fn es si env)
   (emit-simple op fn '%rcx)
@@ -513,6 +538,7 @@
     (emit op "mov ~a(%rax), %rax" (- CLOS-TAG))
     (emit op "jmp *%rax")
   ))
+
 (define (emit-construct-vararg op argc si)
   #;(
       [z 1]
@@ -573,8 +599,9 @@
           (lambda (i)
             (emit op "movq $0, ~a(%rsp)"
                      (* (- WORDSIZE) (+ i 2))))
-          (filter (lambda (i) (<= argc i)) (iota i)))
-       (emit-seq op body (* (- WORDSIZE) (+ i 2)) env))
+          (filter (lambda (i) (<= argc i))
+                  (iota (+ (align-to-multiple 2 i) 1))))
+       (emit-seq op body (* (- WORDSIZE) (+ (align-to-multiple 2 i) 3)) env))
       (,() (error "emit-procedure" "unknown body" body)))
     (emit op "add $~a, %rsp" WORDSIZE)
     (emit op "ret")))
@@ -640,14 +667,8 @@
     (,()
      (guard (string? e))
      (emit-str-lit op e si))
-    #;
-    (,()
-     (guard (symbol? e))
-     (emit op "mov ~a, %rax" (apply-env e env)))
-    ;;; NOTE:
-    ;;; Suppose wordsize=4
-    ;;; (%rsp) points to frame pointer, -4(%rsp) points to closure pointer
-    ;;; therefore, first local (i = 0) starts at (-4 * (+ 0 2))(%rsp) = -8(%rsp)
+    ((quote ())
+     (emit op "mov $~a, %rax" (immediate-rep '())))
     ((local-set! ,i ,e)
      (guard (integer? i))
      (emit-expr op e si env)
@@ -655,8 +676,8 @@
     ((local-ref ,i)
      (guard (integer? i))
      (emit op "mov ~a(%rsp), %rax" (* (- WORDSIZE) (+ i 2))))
-    ((quote ())
-     (emit op "mov $~a, %rax" (immediate-rep '())))
+    ((collect)
+     (emit-walk-stack op -1 si env))
     ((collect ,sz)
      (emit-walk-stack op sz si env))
     ((global ,lbl)
@@ -681,6 +702,10 @@
      (emit-prim op (cons pr es) si env))
     ((call ,tail? ,maybe-decl ,fn . ,es)
      ((if tail? emit-tail-call emit-call) op maybe-decl fn es si env))
+    ((foreign-call! ,fn . ,es)
+     (emit op "mov ~a, (free_ptr)" AP-REG)
+     (emit-foreign-call op fn es si env)
+     (emit op "mov (free_ptr), ~a" AP-REG))
     ((foreign-call ,fn . ,es)
      (emit-foreign-call op fn es si env))
     (,() (error "emit-expr" "unmatch" e))))
@@ -707,13 +732,18 @@
             (emit-variadic-procedure op name fvs clauses))
            (,() (error "emit-code" "unmatch" label))))
        labels)
+     ;;; NOTE:
+     ; stack aligned before call
+     ; enter call, return address pushed, misaligned by 8 bytes
+     ; pushed rbp, aligned at 16 bytes
      (emit op "~a:" entry-name)
      (emit op "push %rbp")
      (emit op "mov %rsp, %rbp")
+     (emit op "movq $0, ~a(%rsp)" (- WORDSIZE))
      (for-each
-       (lambda (i) (emit op "movq $0, ~a(%rsp)" (* (- WORDSIZE) (+ i 1))))
-       (iota (+ i 1)))
-     (emit-seq op body (* (- WORDSIZE) (+ i 2)) (make-env))
+       (lambda (i) (emit op "movq $0, ~a(%rsp)" (* (- WORDSIZE) (+ i 2))))
+       (iota (+ 1 (align-to-multiple 2 i))))
+     (emit-seq op body (* (- WORDSIZE) (+ (align-to-multiple 2 i) 3)) (make-env))
      (emit op "mov $0, %rax")
      (emit op "pop %rbp")
      (emit op "ret"))
@@ -740,7 +770,8 @@
 
 (define (read-meta obj-file)
   (let* ((filename (mk-tmpname "read-meta" "txt"))
-          (_ (system* "objcopy --dump-section .main_entry=~a ~a"
+          (_ (system* "~a --dump-section .main_entry=~a ~a"
+                      OBJCOPY
                       filename obj-file))
           (inp (open-input-file filename))
           (meta (read inp)))
@@ -757,9 +788,6 @@
             (recur (cdr xs)
               (lambda (xs ys zs)
                 (k (cons x xs) (cons y ys) (cons z zs)))))))))
-
-(define (mk-tmpname f ext)
-  (format "/dev/shm/scm-build-~a-~a.~a" (path-fileroot f) (random-string 8) ext))
 
 (define (emit-objs input-paths k)
   (map3-k
@@ -782,15 +810,16 @@
            output-path
            (apply string-append
                   (map (lambda (s) (string-append " \"" s "\" ")) objs)))
-  (system* "objcopy --remove-section=.main_entry --add-section .main_entry=<(echo ~s) ~a"
+  (system* "~a --remove-section=.main_entry --add-section .main_entry=<(echo ~s) ~a"
+           OBJCOPY
            (format "~s" (list entries globals))
            output-path))
 
-(define (linking-to-exe output-path objs metas)
+(define (emit-main output-path objs metas)
   (define (make-prim-call pr . es)
     `(call #f (prim ,pr) . ,es))
-  (define (make-box-init e)
-    (make-prim-call 'cons e '(quote ())))
+  (define (make-box-init)
+    (make-prim-call 'cons 0 '(quote ())))
   (define entries (apply append (map car metas)))
   (define globals (apply set-union (map cadr metas)))
   (define tmp-filename (mk-tmpname (string-append (path-fileroot output-path) "-exec") "s"))
@@ -813,11 +842,13 @@
          (guard (symbol? g))
          (emit op ".p2align 3")
          (emit op "~a: .~abyte 0" g WORDSIZE))
-        (,() (error "linking-to-exe" "unmatch" g))))
+        (,() (error "emit-main" "unmatch" g))))
       globals)
     (emit op ".section .text")
     (emit-L-apply op)
     (emit op "main:")
+    (emit op "push %rbp")
+    (emit op "mov %rsp, %rbp")
     (emit op "mov %rsp, BOT_EBP")
     (emit op "mov %rsp, %rbp")
     (emit op "mov %rsi, ARGV")
@@ -827,16 +858,17 @@
     (emit op "# globals")
     (for-each
       (lambda (g)
-        (emit-expr op `(set-label! ,g ,(make-box-init 0)) (- WORDSIZE) #f))
+        (emit-expr op `(set-label! ,g ,(make-box-init)) (- WORDSIZE) #f))
       globals)
     (emit op "# end of globals")
     (for-each
       (lambda (entry) (emit op "call ~a" entry))
       entries)
     (emit op "mov $0, %rax")
+    (emit op "pop %rbp")
     (emit op "ret")
     (close-output-port op))
-  (system* "~a ~a ~a ~a runtime.o -o ~a"
+  (system* "~a ~a ~a ~a -r -o ~a"
            CC CC-ARGS
            tmp-filename
            (apply string-append
@@ -846,19 +878,43 @@
 
 (match (cdr (command-line))
   (("-o" ,output-path . ,input-paths)
+   (guard (equal? (path-extension output-path) "out"))
    (emit-objs input-paths
     (lambda (objs metas frees)
-      ((if (equal? (path-extension output-path) "o") combine-objs linking-to-exe) output-path objs metas)
+      (let ((tmp-filename (mk-tmpname (path-fileroot output-path) "o")))
+        (emit-main tmp-filename objs metas)
+        (system* "~a ~a runtime.o ~a -o ~a"
+                 CC CC-ARGS
+                 tmp-filename output-path)
+        (system* "rm -f ~a" tmp-filename))
       (map (lambda (f) (f)) frees))))
+  (("-o" ,output-path . ,input-paths)
+   (guard (equal? (path-extension output-path) "o"))
+   (emit-objs input-paths
+    (lambda (objs metas frees)
+      (combine-objs output-path objs metas)
+      (map (lambda (f) (f)) frees))))
+  (("--emit-main" ,output-path . ,input-paths)
+   (emit-objs input-paths
+    (lambda (objs metas frees)
+      (emit-main output-path objs metas)
+      (map (lambda (f) (f)) frees))))
+  (("--bin" ,output-path ,runtime ,main)
+   (system* "~a ~a ~a ~a -o ~a" CC CC-ARGS runtime main output-path))
   (("--make-prim-lib" ,output-path)
    (write-primitive-lib output-path))
   ((,input-path . ,input-paths)
    (emit-objs (cons input-path input-paths)
     (lambda (objs metas frees)
-      (let ((output-path (mk-tmpname "tmp" "out")))
-        (linking-to-exe output-path objs metas)
-        (system* output-path)
-        (system* "rm -f ~a" output-path)
-        (map (lambda (f) (f)) frees)))))
+      (let* ((tmpname (mk-tmpname "tmp" ""))
+             (final (string-append tmpname ".o"))
+             (out (string-append tmpname ".out")))
+        (emit-main final objs metas)
+        (system* "~a ~a runtime.o ~a -o ~a"
+                 CC CC-ARGS
+                 final out)
+        (system* out)
+        (system* "rm -f ~a ~a" final out))
+      (map (lambda (f) (f)) frees))))
   (,cmd-ln (error (car (command-line)) "unmatch" cmd-ln)))
 )

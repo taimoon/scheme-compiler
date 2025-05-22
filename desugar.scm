@@ -58,7 +58,7 @@
     let*
     cond not and or
     lambda letrec case-lambda
-    set! foreign-call prim-call
+    set! foreign-call foreign-call! prim-call
     quote quasiquote unquote unquote-splicing
     match import include
     ))
@@ -257,7 +257,7 @@
   (define (insert-check sz obj)
     `(if ,(make-prim-call 'integer? sz)
          ,(make-prim-call 'make-vector sz obj)
-         (foreign-call s_make_vector_size_err ,sz)))
+         (foreign-call! s_make_vector_size_err ,sz)))
   (match es
     ((,sz)
      (intro-name (uniquify sz env)
@@ -272,7 +272,7 @@
   (define (insert-check sz ch)
     `(if ,(make-prim-call 'integer? sz)
          ,(make-prim-call 'make-string sz ch)
-         (foreign-call s_make_string_size_err ,sz)))
+         (foreign-call! s_make_string_size_err ,sz)))
   (match es
     ((,sz)
      (intro-name (uniquify sz env)
@@ -419,6 +419,8 @@
       (,res (error "uniquify" "unmatch" res))))
     ((foreign-call ,fn . ,es)
      `(foreign-call ,fn . ,(uniquify-each es env add-global!)))
+    ((foreign-call! ,fn . ,es)
+     `(foreign-call! ,fn . ,(uniquify-each es env add-global!)))
     ((match . ,())
      (uniquify (compile-match e) env))
     (,() (error "uniquify" "unmatch" e)))))

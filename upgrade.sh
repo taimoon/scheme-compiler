@@ -23,12 +23,14 @@ function test_x64_chez {
 
 function test_i686 {
     make rebuild-clean
-    time make bootstrap-test TARGET_ARCH=i686 SCM_CC_BACKEND="compiler.scm" SCM_CC="./compiler-i686.out" -j
+    time make bootstrap-test TARGET_ARCH=i686 SCM_CC_BACKEND="compiler.scm" SCM_CC="./compiler-i686.out" -j &&\
+    mv compiler-2.out ./compiler-i686.out
 }
 
 function test_x86 {
     make rebuild-clean
-    time make bootstrap-test TARGET_ARCH=x86-64 SCM_CC_BACKEND="compiler-x86_64.scm" SCM_CC="./compiler-x86_64.out" -j
+    time make bootstrap-test TARGET_ARCH=x86-64 SCM_CC_BACKEND="compiler-x86_64.scm" SCM_CC="./compiler-x86_64.out" -j &&\
+    mv compiler-2.out ./compiler-x86_64.out
 }
 
 function test_x64_i686_cross {

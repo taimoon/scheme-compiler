@@ -1,0 +1,39 @@
+FROM ubuntu:25.04
+
+# Set environment variables to avoid interactive prompts during build
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update -y
+
+RUN apt-get install -y \
+    cloud-image-utils wget
+
+WORKDIR /workspace
+
+RUN apt-get install -y \
+    qemu-system-riscv qemu-system-aarch64 u-boot-qemu
+
+ENV FEDORA_URL="https://dl.fedoraproject.org/pub/alt/risc-v/release/42/Cloud/riscv64/images/Fedora-Cloud-Base-UEFI-UKI-42.20250414-8635a3a5bfcd.riscv64.qcow2"
+ENV FEDORA_NAME="Fedora-Cloud-Base-UEFI-UKI-42.riscv64.qcow2"
+RUN wget -O ${FEDORA_NAME} ${FEDORA_URL}
+RUN qemu-img resize ${FEDORA_NAME} 20G
+RUN cp /usr/lib/u-boot/qemu-riscv64_smode/uboot.elf u-boot.elf && \
+    cp /usr/lib/u-boot/qemu-riscv64_smode/u-boot.bin u-boot.bin
+
+RUN apt-get install -y qemu-efi-aarch64
+
+ENV UBUNTU_URL="https://cloud-images.ubuntu.com/minimal/releases/plucky/release/ubuntu-25.04-minimal-cloudimg-arm64.img"
+ENV UBUNTU_NAME="ubuntu-25.04-minimal-cloudimg-arm64.qcow2"
+    
+RUN wget -o ${UBUNTU_NAME} ${UBUNTU_URL} && \
+    qemu-img resize ubuntu-25.04-minimal-cloudimg-arm64.img 20G
+
+RUN truncate -s 64m varstore.img && \
+    truncate -s 64m efi.img && \
+    dd if=/usr/share/qemu-efi-aarch64/QEMU_EFI.fd of=efi.img conv=notrunc
+
+COPY ./user-data.yaml .
+COPY ./meta-data.yaml .
+RUN cloud-localds seed.iso user-data.yaml meta-data.yaml
+
+CMD ["/bin/bash"]

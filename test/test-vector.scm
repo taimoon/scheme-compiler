@@ -54,3 +54,11 @@
   (newline)
   (write (vector? xs))
   (newline))
+
+(write (make-vector 3 0)) (newline)
+(write (make-vector 5 #\nul)) (newline)
+(let ((v (make-vector 7 (vector))))
+  (write
+    (and (eq? (vector-ref v 0) (vector-ref v 6))
+         (eq? (vector-ref v 3) (vector-ref v 5))))
+  (newline))

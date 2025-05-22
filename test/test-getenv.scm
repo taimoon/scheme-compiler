@@ -1,0 +1,1 @@
+(writeln (getenv (cadr (command-line))))

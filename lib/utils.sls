@@ -28,7 +28,8 @@
     measure-pass
     lsort
     partition
-    zip-k)
+    zip-k
+    mk-tmpname)
   (import
     (except (rnrs (6)) partition)
     (only (chezscheme)

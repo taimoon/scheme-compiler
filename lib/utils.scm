@@ -160,7 +160,7 @@
         (rdm-str (random-string 8)))
     (lambda (prefix)
       (set! count (+ count 1))
-      (gensym (format "~a_~a_~a" prefix rdm-str count)))))
+      (string->symbol (format "~a_~a_~a" prefix rdm-str count)))))
 
 (define (string-index s ch/pred)
   (define pred
@@ -263,3 +263,8 @@ Extension       .txt             .txt
 
 (define (measure-pass $who)
   (lambda (e) (format (current-error-port) "~a: ~a\n" (rpad (format "~a" $who) #\space 32) (count-cons e)) e))
+
+(define (mk-tmpname f ext)
+  (string-append
+    (format "/dev/shm/scm-build-~a-~a" (path-fileroot f) (random-string 8))
+    (if (equal? ext "") ext (string-append "." ext))))

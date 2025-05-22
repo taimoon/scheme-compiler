@@ -10,6 +10,14 @@ typedef intptr_t* ptr_t;
 #define FIXNUM_MASK     0b00000111
 #define FIXNUM_TAG      0b00000000
 #define FIXNUM_SHIFT    3
+#elif defined(__aarch64__)
+#define FIXNUM_MASK     0b00000111
+#define FIXNUM_TAG      0b00000000
+#define FIXNUM_SHIFT    3
+#elif defined(__riscv) && __riscv_xlen == 64
+#define FIXNUM_MASK     0b00000111
+#define FIXNUM_TAG      0b00000000
+#define FIXNUM_SHIFT    3
 #else
 #define FIXNUM_MASK     0b00000011
 #define FIXNUM_TAG      0b00000000
@@ -31,6 +39,8 @@ typedef intptr_t* ptr_t;
 #define STR_TAG         0b00000011
 #define SYM_TAG         0b00000101
 #define CLOS_TAG        0b00000110
+#define FALSE_IMM       BOOL_TAG
+#define TRUE_IMM        ((1 << IMM_SHIFT) | BOOL_TAG)
 int FLIP_COUNT = 0;
 int HEAP_SIZE;
 word_t *free_ptr, *HEAP_START, *HEAP_END, *fromspace_start, *fromspace_end, *tospace_start, *tospace_end, *scan_ptr;
@@ -111,9 +121,31 @@ const char* to_cstr(word_t x){
     return s;
 }
 
+word_t to_scm_str(const char *s){
+    word_t len = strlen(s);
+    word_t res = (word_t)free_ptr | STR_TAG;
+    *free_ptr = len << FIXNUM_SHIFT;
+    char* d = (char*)(free_ptr + 1);
+    strcpy(d, s);
+    free_ptr = free_ptr + 1;
+    free_ptr = (word_t*)((char*)free_ptr + len + 1);
+    free_ptr = (word_t*)align_to_multiple(AVX_ALIGNMENT, (word_t)free_ptr);
+    return res;
+}
+
 #include <sys/unistd.h>
 word_t s_getpid(){
     return getpid() << FIXNUM_SHIFT;
+}
+
+word_t s_getenv(word_t x){
+    const char* val = getenv(to_cstr(x));
+    if(val == NULL){
+        return FALSE_IMM;
+    }
+    else{
+        return to_scm_str(val);
+    }
 }
 
 void s_exit(word_t v){

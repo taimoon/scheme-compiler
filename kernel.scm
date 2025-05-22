@@ -9,6 +9,11 @@
 (define (system cmd)
   (foreign-call s_system cmd))
 
+(define (getenv name)
+  (if (not (string? name))
+      (error "getenv" "expect-string" name)
+      (foreign-call s_getenv name)))
+
 (define command-line
   (let ()
     (define (vector->list v)

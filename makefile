@@ -2,24 +2,41 @@
 # build		System on which compiler is built
 # host		System on which compiler itself will run
 # target	System on which output of compiler will run
-
+SHELL := /bin/bash
+CC ?= gcc
+OBJCOPY ?= objcopy
+CFLAGS += -g -fno-omit-frame-pointer
+TARGET_ARCH ?= x86-64
 SCM_CC =
 LIB_SRCS = intern.scm kernel.scm prim.scm lib/scheme-libs.scm lib/writer.scm lib/reader.scm
 LIB_OBJS = $(LIB_SRCS:.scm=.o)
+fLINK_RUNTIME ?= 1
 SCM_CC_BACKEND =
 SCM_CC_SRCS = \
 	lib/match-defmacro.scm lib/set.scm lib/utils.scm \
 	desugar.scm tmp-alloc.scm front.scm $(SCM_CC_BACKEND)
 SCM_CC_OBJS = $(SCM_CC_SRCS:.scm=.o)
-CC = gcc
-CFLAGS += -g -fno-omit-frame-pointer -m$(WORDSIZE) -march=$(TARGET_ARCH)
-TARGET_ARCH ?= x86-64
+
 ifeq ($(TARGET_ARCH),x86-64)
+	WORDSIZE = 64
+	CFLAGS += -m$(WORDSIZE) -march=$(TARGET_ARCH)
+else ifeq ($(TARGET_ARCH),armv8-a)
+	WORDSIZE = 64
+else ifeq ($(TARGET_ARCH),rv64)
 	WORDSIZE = 64
 else ifeq ($(TARGET_ARCH),i686)
 	WORDSIZE = 32
+	CFLAGS += -m$(WORDSIZE) -march=$(TARGET_ARCH)
 else
     $(error "Unknown machine architecture $(TARGET_ARCH)")
+endif
+
+### For cross compilation purpose
+NCC_OPT = -o
+RTS = runtime.c
+ifeq ($(fLINK_RUNTIME), 0)
+    NCC_OPT = --emit-main
+	RTS =
 endif
 
 TESTS =  test/test-lit.out \
@@ -97,8 +114,8 @@ test/test-command-line.out : $(SCM_LIB) test/test-command-line.scm
 	$(SCM_CC) -o $@ $(SCM_LIB) $*.scm
 	diff <(./$@ reimu marisa -19 2 3 5) $*.txt
 
-runtime.o:
-	$(CC) $(CFLAGS) runtime.c -c -o runtime.o
+$(RTS:.c=.o):
+	$(CC) $(CFLAGS) $(RTS) -c -o $*.o
 
 prim.scm:
 	$(SCM_CC) --make-prim-lib prim.scm
@@ -113,9 +130,9 @@ $(SCM_LIB): $(LIB_OBJS)
 	$(SCM_CC) -o $(SCM_LIB) $(LIB_OBJS)
 	rm $(LIB_OBJS) prim.scm
 
-$(SCM_NCC): runtime.o $(SCM_LIB) $(SCM_CC_OBJS)
-	$(SCM_CC) -o $(SCM_NCC) $(SCM_LIB) $(SCM_CC_OBJS)
-	rm runtime.o $(SCM_CC_OBJS)
+$(SCM_NCC): $(RTS:.c=.o) $(SCM_LIB) $(SCM_CC_OBJS)
+	$(SCM_CC) $(NCC_OPT) $(SCM_NCC) $(SCM_LIB) $(SCM_CC_OBJS)
+	rm $(RTS:.c=.o) $(SCM_CC_OBJS)
 
 make-lib : $(SCM_LIB)
 new-compiler: $(SCM_NCC)
