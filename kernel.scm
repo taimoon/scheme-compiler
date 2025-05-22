@@ -12,7 +12,7 @@
 (define (getenv name)
   (if (not (string? name))
       (error "getenv" "expect-string" name)
-      (foreign-call s_getenv name)))
+      (foreign-call! s_getenv name)))
 
 (define command-line
   (let ()
