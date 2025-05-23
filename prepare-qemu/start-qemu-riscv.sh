@@ -1,4 +1,3 @@
-#!/bin/bash
 # https://www.qemu.org/docs/master/system/riscv/virt.html
 # https://documentation.ubuntu.com/server/how-to/virtualisation/qemu/index.html
 # https://wiki.ubuntu.com/RISC-V/QEMU
@@ -45,10 +44,3 @@ qemu-system-riscv64 \
     -cdrom ${QEMU_ENV_PATH}/seed.iso
 
 exit 0
-# NOTE: add ssh public key into the user-data.yaml
-# NOTE: this is how you can do rsync
-rsync -avz \
-    -e "ssh -p 22222" \
-    --exclude 'qemu-env' \
-    --exclude '.git' \
-    $PWD root@localhost:~

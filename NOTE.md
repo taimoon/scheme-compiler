@@ -1,7 +1,44 @@
+# Data Representation
+## Memory Layout
+```
+      type      | 31            bit             0
+-------------------------------------------------
+        integer | iiiiiiiiiiiiiiiiiiiiiiiiiiiii00
+           char | 000000000000000cccccccc00000111
+        boolean | 0000000000000000000000b00001111
+   pair pointer | pppppppppppppppppppppppppppp001
+ vector pointer | pppppppppppppppppppppppppppp010
+ string pointer | pppppppppppppppppppppppppppp011
+ symbol pointer | pppppppppppppppppppppppppppp101
+closure pointer | pppppppppppppppppppppppppppp110
+```
+
+## String Representation
+```
++----------+----+----+-----+-------+
+| fxlength | c0 | c1 | ... | #\nul |
++----------+----+----+-----+-------+
+```
+The extra null character is convenient in casting to C-string when interfacing with C functions.
+
+## Vector Representation
+```
++----------+--------+--------+--------+
+| fxlength |   v0   |   v1   |   ...  |
++----------+--------+--------+--------+
+```
+
+## Closure Representation
+```
++------------+------------+------------+------------+------------+
+|code pointer|  fxlength  |     fv1    |    fv2     |     ...    |
++------------+------------+------------+------------+------------+
+```
+
 # Calling Convention
 ```
 #;
-(calling layout
+(calling layout for x64, x86
   "si points to free cell; starts with -4(%rsp).
    Current impl allocate location for locals without mutating the stack pointer.
    In other words, current frame does not mutate esp.
@@ -70,62 +107,4 @@
     si    _
   )
 )
-```
-
-```
-;;; alignment formula
-; (off + (8 - 1)) & -8 = (off & 7) + -8
-#|INTERNALS:
-;;;; Calling convention
-%ebp is used as closure pointer but caller-save.
-
-(i686
-  (caller-save eax ecx edx)
-  (callee-save ebx ebp edi esi esp))
-(x64
-  (caller-save
-    rax rcx rdx rsi rdi r8 r9 r10 r11)
-  (callee-save
-    rbx rsp rbp r12 r13 r14 r15)
-)
-;;;; Data Repr
-;;; Tag allocations
-fixnum
-  (b snnn nnnn nnnn nnnn nn00)
-immediate
-  (b xxxx xxxx xxxx iiii i111)
-pointer
-  (
-  type      ttt
-  fx        000
-  pair      001
-  vector    010
-  string    011
-  fx        100
-  symbol    101
-  closure   110
-  imm       111
-  )
-  (b pppp pppp pppp pppp pttt)
-;;; Composite Data Representation
-; We see that fx-* can further encode certain information
-; like immutable or mutable
-; like static or dynamic allocated
-
-; fx-free-vars-counts is not queryable programmatically
-; being used for garbage collector
-; encode whether it is for closure or static
-; workaround optimization is to initalize the labels statically
-pair
-  (car cdr)
-vector
-  (fx-vector-length a0 a1 ...)
-string
-  (fx-str-length c0 c1 ... #\nul)
-symbol
-  ->string
-closure
-  ; allocated lambda
-  (code-pointer fx-free-vars-counts fv0 fv1 ...)
-|#
 ```

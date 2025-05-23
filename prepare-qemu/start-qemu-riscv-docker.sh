@@ -1,7 +1,7 @@
 export MEM_SZ="8G"
 export CPU_N=6
 docker build -t qemu-misc -f prepare-qemu/dockerfile-qemu prepare-qemu/
-docker run -it --name $(whoami)- \
+docker run -it --name $(whoami)-fedora-rvcpu \
     -p 22224:22224 \
     qemu-misc \
     /bin/bash -c "\
