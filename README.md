@@ -13,7 +13,7 @@ For example, in order to get riscv64 compiler from x64:
    `gcc runtime.c compiler-riscv.o -o compiler-riscv64.out`
 4. You now have a native RISC-V64 compiler (`compiler-riscv64.out`) and a cross-compiler (`compiler-riscv64.x86_64.out`) targeting RISC-V64 from x64.
 
-For more details, see the [CHANGELOG](CHANGELOG).
+For more details, see the [CHANGELOG](CHANGELOG.md).
 
 # Prerequisite to run the compiler
 - x86_64 CPU
