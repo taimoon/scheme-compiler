@@ -7,12 +7,20 @@
 (define (abs n) (if (< n 0) (- 0 n) n))
 
 (define (vector-for-each f v)
-    (let iter ((i 0))
-      (if (>= i (vector-length v))
-          v
-          (begin
-            (f (vector-ref v i))
-            (iter (+ i 1))))))
+  (let iter ((i 0))
+    (if (>= i (vector-length v))
+        v
+        (begin
+          (f (vector-ref v i))
+          (iter (+ i 1))))))
+
+(define (fold-left f init xs)
+  (if (pair? xs)
+      (fold-left f (f init (car xs)) (cdr xs))
+      init))
+
+(define (map f xs)
+  (if (pair? xs) (cons (f (car xs)) (map f (cdr xs))) '()))
 
 (define (for-each f xs)
   (if (pair? xs) (begin (f (car xs)) (for-each f (cdr xs))) '()))
@@ -35,44 +43,34 @@
       (if (pair? ss)
           (begin
             (string-copy! (car ss) 0 res split (string-length (car ss)))
-            (loop (cdr ss) (+ (string-length (car ss)) split)))  
+            (loop (cdr ss) (+ (string-length (car ss)) split)))
           res))))
 
 (define (string=? s1 s2)
+  (and
+    (string? s1)
+    (string? s2)
+    (or
+      (eq? s1 s2)
       (and
-        (string? s1)
-        (string? s2)
-        (or
-          (eq? s1 s2)
-          (and
-            (= (string-length s1) (string-length s2))
-            (let loop ((i 0))
-                (cond
-                  ((eq? i (string-length s1))
-                    #t)
-                  ((eq? (string-ref s1 i) (string-ref s2 i))
-                    (loop (add1 i)))
-                  (else #f)))))))
+        (= (string-length s1) (string-length s2))
+        (let loop ((i 0))
+            (cond
+              ((eq? i (string-length s1))
+                #t)
+              ((eq? (string-ref s1 i) (string-ref s2 i))
+                (loop (add1 i)))
+              (else #f)))))))
 
-(define (assoc-string k ss)
+(define (assp p xs)
   (cond
-    ((not (pair? ss)) #f)
-    ((string=? k (car (car ss))) (car ss))
-    (else (assoc-string k (cdr ss)))))
-
-(define (vector-fill! v k)
-  (let iter ((i 0))
-    (if (>= i (vector-length v))
-        v
-        (begin
-          (vector-set! v i k)
-          (iter (+ i 1))))))
+    ((not (pair? xs)) #f)
+    ((p (car xs)) (car xs))
+    (else (assp p (cdr xs)))))
 
 (define SYMBOL-TBL-SIZE 0)
 
-;;; NOTE: legacy doesn't support (make-vector v k)
-
-(define SYMBOL-STR-TABLE (vector-fill! (make-vector 512) '()))
+(define SYMBOL-STR-TABLE (make-vector 8 '()))
 
 (define **default-bound** (+ (ash 1 29) -1))
 
@@ -124,6 +122,18 @@
             (set! x (add1 x))
             (string->symbol str)))))))
 
+(define (%make-symbol str hash)
+  (vector str hash))
+
+(define (%symbol-string n)
+  (vector-ref n 0))
+
+(define (%symbol-hash n)
+  (vector-ref n 1))
+
+(define (assoc-string k ss)
+  (assp (lambda (n) (string=? (%symbol-string n) k)) ss))
+
 (define (%SYMBOL-STR-TABLE-resize!)
   (define (%hash-table-add! entries hash-val n)
     (let ((index (mod hash-val (vector-length entries))))
@@ -132,12 +142,13 @@
         index
         (cons n (vector-ref entries index)))))
   (if (>= SYMBOL-TBL-SIZE (* 2 (vector-length SYMBOL-STR-TABLE)))
-      (let ((old SYMBOL-STR-TABLE))
-          (set! SYMBOL-STR-TABLE (vector-fill! (make-vector (* 2 (vector-length SYMBOL-STR-TABLE))) '()))
+      (let ((old SYMBOL-STR-TABLE)
+            (new (make-vector (* 2 (vector-length SYMBOL-STR-TABLE)) '())))
           (vector-for-each
             (lambda (rib)
-              (for-each (lambda (n) (%hash-table-add! SYMBOL-STR-TABLE (car (cdr n)) n)) rib))
-            old))
+              (for-each (lambda (n) (%hash-table-add! new (%symbol-hash n) n)) rib))
+            old)
+          (set! SYMBOL-STR-TABLE new))
       #f))
 
 (define (%%string->symbol str)
@@ -146,12 +157,12 @@
          (rib (vector-ref SYMBOL-STR-TABLE idx))
          (maybe (assoc-string str rib)))
     (if maybe
-        (%string->symbol (car maybe))
-        (begin
-          (vector-set! SYMBOL-STR-TABLE idx (cons (list str hash-val) rib))
+        (%string->symbol (%symbol-string maybe))
+        (let ((n (%make-symbol str hash-val)))
+          (vector-set! SYMBOL-STR-TABLE idx (cons n rib))
           (set! SYMBOL-TBL-SIZE (+ SYMBOL-TBL-SIZE 1))
           (%SYMBOL-STR-TABLE-resize!)
-          (%string->symbol str)))))
+          (%string->symbol (%symbol-string n))))))
 
 (define (%%symbol->string sym)
   (string-copy (%symbol->string sym)))

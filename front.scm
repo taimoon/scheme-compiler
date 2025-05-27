@@ -282,6 +282,7 @@
           ((not (symbol? (car vars)))
            (error "constant-folding" "handle-only-symbolic-var" (car vars)))
           ((and (not (memq (car vars) set!-vars))
+                (not (memq (car inits) set!-vars))
                 (or (immediate? (car inits)) (symbol? (car inits))))
            (loop (cdr vars)
                  (cdr inits)
@@ -300,6 +301,7 @@
           ((not (symbol? (car vars)))
            (error "constant-folding" "handle-only-symbolic-var" (car vars)))
           ((and (not (memq (car vars) set!-vars))
+                (not (memq (car inits) set!-vars))
                 (immediate? (car inits)))
            (extend-env (car vars) (car inits) (recur (cdr vars) (cdr inits))))
           (else
@@ -336,8 +338,17 @@
          (apply (cadr fn) es))
         (else
          (error "constant-folding" "prim:unmatch" e)))))
+    ((if ,pred ,conseq ,altern)
+     (let ((pred (constant-folding pred env set!-vars))
+           (conseq (constant-folding conseq env set!-vars))
+           (altern (constant-folding altern env set!-vars)))
+      (cond
+        ((eq? pred #t) conseq)
+        ((eq? pred #f) altern)
+        (else
+         `(if ,pred ,conseq ,altern)))))
     ((,form . ,es)
-     (guard (memq form '(call begin if)))
+     (guard (memq form '(call begin)))
      `(,form . ,(constant-folding-each es env set!-vars)))
     ((lambda ,params ,variadic? ,fn ,e)
      `(lambda ,params ,variadic? ,fn ,(constant-folding e (extend-env params params env) set!-vars)))
