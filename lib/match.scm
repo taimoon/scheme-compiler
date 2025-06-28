@@ -1,4 +1,9 @@
 ;;; match main program
+;;; Adpated from Oleg's "A simple linear pattern matcher"
+;;; Source: https://okmij.org/ftp/Scheme/macros.html#match-case-simple
+;;; Adapted from SRFI 200 : Panicz Maciej Godek
+;;; Source: https://srfi.schemers.org/srfi-200/srfi-200.html
+
 (define-syntax match
   (syntax-rules ()
     ((_ exp . clauses)
