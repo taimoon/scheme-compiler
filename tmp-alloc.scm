@@ -1,6 +1,6 @@
 (import
   (only (match) match)
-  (only (set) make-set list->set set-union set-diff set-symmetric-diff)
+  (only (set) set-empty? make-set list->set set-union set-diff set-symmetric-diff)
   (only (desugar) make-begin)
   (only (utils)
     writeln
@@ -100,15 +100,19 @@
      (uncover-live e2))
     ((let ((,x (if ,pred ,conseq ,altern))) ,body)
      (if (not (simple? pred))
-         (error "uncover-live" "if:expect-simple" pred)
-         (let ((pred (uncover-live-exp pred))
-               (conseq (uncover-live conseq))
-               (altern (uncover-live altern))
-               (live-sets (uncover-live body)))
-          `(,(set-union pred (car conseq) (car altern)
-                        (set-symmetric-diff (car live-sets) (if (eq? x '_) (make-set) (make-set x))))
-            (if ,conseq ,altern)
-            ,@live-sets))))
+         (error "uncover-live" "if:expect-simple" pred))
+     (let* ((live-sets (uncover-live body))
+            (live-set-after-if (set-diff (car live-sets) (make-set x)))
+            (conseq
+             (propagate-live-set live-set-after-if
+                                 (uncover-live conseq)))
+            (altern
+             (propagate-live-set live-set-after-if
+                                 (uncover-live altern))))
+      `(,(set-union (uncover-live-exp pred) (car conseq) (car altern)
+                    (set-symmetric-diff (car live-sets) (if (eq? x '_) (make-set) (make-set x))))
+        (if ,conseq ,altern)
+        ,@live-sets)))
     ((let ((_ ,e1)) ,e2)
      (let ((live-sets (uncover-live e2)))
       (cons (set-union (uncover-live-exp e1) (car live-sets)) live-sets)))
@@ -140,36 +144,26 @@
 (define (mappend-live-set append live-set live-sets)
   (map-live-sets (lambda (live-set*) (append live-set live-set*)) live-sets))
 
-(define (fix-if-live-sets live-sets)
-  (define (fix-if-live-set live-set)
-    (match live-set
-      ((if ,conseq ,altern)
-       `(if ,(fix-if-live-sets conseq) ,(fix-if-live-sets altern)))
-      (,live-set live-set)))
-  (let fix-if-live-sets ((live-sets live-sets))
-    (cond
-      ((not (pair? live-sets))
-       '())
-      ((not (pair? (cdr live-sets)))
-       (list (fix-if-live-set (car live-sets))))
-      (else
-        (let ((live-set (fix-if-live-set (car live-sets)))
-              (live-sets (fix-if-live-sets (cdr live-sets))))
-          (match live-set
-            ((if ,conseq ,altern)
-             `((if ,(mappend-live-set set-union (car live-sets) conseq)
-                   ,(mappend-live-set set-union (car live-sets) altern))
-               ,@live-sets))
-            (,() (cons live-set live-sets))))))))
+(define (propagate-live-set live-set live-sets)
+  (if (set-empty? live-set)
+      live-sets
+      (let recur ((live-sets live-sets))
+        (if (not (pair? live-sets))
+          '()
+          (match (car live-sets)
+            ((if ,csq-lv* ,alt-lv*)
+             (cons
+               `(if ,(propagate-live-set live-set csq-lv*)
+                    ,(propagate-live-set live-set alt-lv*))
+               (recur (cdr live-sets))))
+            (,lv
+             (cons (set-union live-set lv)
+                   (recur (cdr live-sets)))))))))
 
 (define (uncover-live* e)
   (define (pipe x . fs)
     (fold-left (lambda (x f) (f x)) x fs))
-  (pipe
-    e
-    uncover-live
-    strip-emtpy-live-sets
-    fix-if-live-sets))
+  (strip-emtpy-live-sets (uncover-live e)))
 
 (define (max-loc-req live-sets)
   (apply max (cons 0 (map length (flatten-live-sets live-sets)))))
