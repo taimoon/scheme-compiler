@@ -1,3 +1,5 @@
+#!/bin/bash
+set -xe
 export MEM_SZ="8G"
 export CPU_N=4
 

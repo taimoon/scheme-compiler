@@ -1,8 +1,9 @@
+#!/bin/bash
 # https://www.qemu.org/docs/master/system/riscv/virt.html
 # https://documentation.ubuntu.com/server/how-to/virtualisation/qemu/index.html
 # https://wiki.ubuntu.com/RISC-V/QEMU
 # assuming . is the root of repo
-set -x
+set -xe
 WORKDIR=./prepare-qemu
 
 export QEMU_ENV_PATH=./qemu-env

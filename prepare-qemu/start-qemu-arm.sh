@@ -1,7 +1,8 @@
+#!/bin/bash
 # see dockerfile-qemu-arm
 ### aarch64 ubuntu
 ### https://cloud-images.ubuntu.com/
-set -x
+set -xe
 WORKDIR=./prepare-qemu
 
 export QEMU_ENV_PATH=./qemu-env

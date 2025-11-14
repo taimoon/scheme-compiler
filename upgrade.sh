@@ -1,3 +1,4 @@
+#!/bin/bash
 export HEAP_SIZE=$((0xfffff8))
 export CHEZSCHEMELIBDIRS=".:./lib/"
 

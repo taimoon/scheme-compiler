@@ -1,3 +1,5 @@
+#!/bin/bash
+set -xe
 export MEM_SZ="8G"
 export CPU_N=6
 docker build -t qemu-misc -f prepare-qemu/dockerfile-qemu prepare-qemu/
