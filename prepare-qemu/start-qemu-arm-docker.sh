@@ -4,7 +4,7 @@ export MEM_SZ="8G"
 export CPU_N=4
 
 docker build -t qemu-misc -f prepare-qemu/dockerfile-qemu prepare-qemu/
-docker run --rm -it --name $(whoami)-ubuntu-aarch64 \
+docker run -it --name $(whoami)-ubuntu-aarch64 \
     -p 22225:22225 \
     qemu-misc \
     /bin/bash -c "\

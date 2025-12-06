@@ -1,7 +1,7 @@
 #!/bin/bash
 set -xe
-export HEAP_SIZE=$((0xfffff8))
-export CHEZSCHEMELIBDIRS=".:./lib/"
+source activate.sh
+TARGET_ARCH="${TARGET_ARCH:-x86-64}"
 
 # Term		Meaning
 # build		System on which compiler is built
@@ -67,13 +67,33 @@ function test_x64_i686_cross {
         TARGET_ARCH=x86-64 SCM_CC_BACKEND="compiler-x86_64.scm" \
         SCM_NCC="./compiler-x86_64-new.out" -j
     rm ./compiler-i686-new.out ./compiler-x86_64-new.out
-    
 }
 
-time scheme --script make-compiler-chez.scm &&\
-test_i686_chez
-test_x64_chez
-test_i686
-test_x86
-test_x64_i686_cross
-exit 0
+function test_arm64 {
+    export HEAP_SIZE=$((0xfffff8))
+    gcc -c runtime.c -o runtime.o
+    gcc runtime.o compiler-arm.o -o compiler-arm64.out
+    time make tests TARGET_ARCH=armv8-a SCM_CC="./compiler-arm64.out" -j$(nproc)
+    time make bootstrap-test TARGET_ARCH=armv8-a SCM_CC_BACKEND="compiler-arm64.scm" SCM_CC="./compiler-arm64.out" -j$(nproc)
+}
+
+function test_riscv64 {
+    export HEAP_SIZE=$((0xfffff8))
+    gcc -c runtime.c -o runtime.o
+    gcc runtime.o compiler-riscv.o -o compiler-riscv64.out
+    time make tests TARGET_ARCH=rv64 SCM_CC="./compiler-riscv64.out" -j$(nproc)
+    time make bootstrap-test TARGET_ARCH=rv64 SCM_CC_BACKEND="compiler-riscv64.scm" SCM_CC="./compiler-riscv64.out" -j$(nproc)
+}
+
+if [ "${TARGET_ARCH}" = "arm64" ]; then
+    test_arm64
+elif [ "${TARGET_ARCH}" = "riscv64" ]; then
+    test_riscv64
+else
+    time scheme --script make-compiler-chez.scm
+    test_i686_chez
+    test_x64_chez
+    test_i686
+    test_x86
+    test_x64_i686_cross
+fi
