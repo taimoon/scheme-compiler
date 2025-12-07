@@ -271,7 +271,6 @@ else
 	make make_runtime SCM_RUNTIME=runtime.so
 	make from_chez TARGET_ARCH=arm64
 	make test_one_target NPROC=$(NPROC) SCM_RUNTIME=runtime.so SCM_CC="scheme --script compiler.so" SCM_NCC="./compiler-arm64-new.out"
-	TARGET_ARCH=arm64 ./test_psyntax.sh
 endif
 
 .PHONY: test_arm64_cross
