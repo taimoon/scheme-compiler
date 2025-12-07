@@ -20,6 +20,15 @@ For more details, see the [CHANGELOG](CHANGELOG.md).
 - Ubuntu, Fedora or Fedora WSL, https://docs.fedoraproject.org/en-US/cloud/wsl/
 - Installing dependecies (refer to dockerfile)
 
+# Compiling from chezscheme
+
+Suppose you've installed the gcc and chezscheme.
+
+```bash
+source env.sh
+make make_amd64_compiler_chez
+```
+
 # How to use
 ```bash
 source env.sh
