@@ -4,18 +4,12 @@
 (compile-library "set.sls" "set.so")
 (concatenate-object-files "lib.so" "match.so" "utils.so" "set.so")
 (current-directory "..")
+(define rider (cadr (command-line)))
+(define backend (caddr (command-line)))
 (make-boot-file "compiler.so"
   '("scheme" "petite")
   "lib/lib.so"
-  "desugar.sls"
-  "tmp-alloc.sls"
   "front.sls"
-  "compiler.scm")
-(make-boot-file "compiler-x86_64.so"
-  '("scheme" "petite")
-  "lib/lib.so"
-  "desugar.sls"
-  "tmp-alloc.sls"
-  "front.sls"
-  "compiler-x86_64.scm")
+  backend
+  rider)
 (system "rm -f lib/*.so")

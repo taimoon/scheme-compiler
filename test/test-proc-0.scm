@@ -1,0 +1,5 @@
+(let ((writeln (lambda (x) (write x) (newline)))
+      (sqr (lambda (x) (* x x)))
+      (adder (lambda (x) (lambda (y) (+ x y)))))
+  (writeln (sqr 3))
+  (writeln ((adder 3) 2)))

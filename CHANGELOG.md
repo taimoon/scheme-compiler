@@ -1,4 +1,54 @@
 # Changelog
+## 2025-12-07
+
+This is a big leap from the previous version. There are many changes in the implementation to support new features.
+
+### Features
+
+- Temporarily dropped RISCV-64 support
+- Supported backends: AMD64, AArch64, and i686
+- `bytevector`
+- `eval`
+- Multiple values
+- First-class continuations
+- Unicode string and Unicode I/O
+
+### Implementation
+
+- Changed how objects are represented (see `runtime.c`)
+- Global variables are supported via symbol value slots
+- Operand primitives are also supported via symbol value slots.
+  Because RnRs requires `(eq? + +) => #t`, naive eta-expansion would break this.
+- Added a primitive `letrec` form and self-referential closure optimization
+- `vector`, `string`, and `bytevector` are now complex objects
+- Generate Machine IR first, then emit assembly text
+- Better polyvariadic procedure representation (i.e., `case-lambda`) as follows:
+
+  ```scm
+  (case-lambda clmb-lbl
+    (lambda lmb-lbl0 fvs ...)
+    (lambda lmb-lbl1 fvs ...)
+    ...)
+  =>
+  (closure clmb-lbl (closure lmb-lbl0 fvs ...) (closure lmb-lbl1 fvs ...) ...)
+  ```
+- More precise liveness analysis
+- Added new passes `remove-dead-vars` and `reorder-expr` to reduce register allocation pressure
+- `purify-letrec` pass is applied before `abstract-folding` to make abstract folding easier for `letrec` cases
+- Dropped special form `foreign-call!`
+- Allocation pointer stores the address of `free_ptr`.
+  This makes memory handling easier, as it remains constant even if a foreign call adjusts the value of `free_ptr`.
+  This might make inline allocation slightly slower, as the program needs to fetch it twice.
+
+What hasn't changed is that I kept the same trade-off as the last version: the stack layout is the same regardless of the backend.
+This requires a uniform calling convention for internal scheme calls.
+To use the Linux OS linker, the binaries are required to be position-independent code (PIC).
+For the i686 backend, the compiler needs to save the `ebx` register on the stack to be PIC, whereas other backends don’t. Even so, other backends’ stack layouts have a hole that used to store `ebx` to maintain compatibility.
+
+By the way, x86-64 is just AMD64.
+
+I've purchased a Raspberry Pi 500 to test my scheme native ARM64 compiler.
+
 ## 2025-05-23
 - Support AArch64 and RISC-V64
 - Add new special form `foreign-call!` which uses the allocation pointer

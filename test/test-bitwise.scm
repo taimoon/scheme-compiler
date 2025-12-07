@@ -1,3 +1,4 @@
+(let ()
 (write (ash 2 2))
 (newline)
 (write (ash (ash 2 2) -2))
@@ -14,3 +15,4 @@
 (newline)
 (write (eq? (bitwise-ior #b1010 #b100) #b1110))
 (newline)
+)

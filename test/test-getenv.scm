@@ -1,1 +1,5 @@
-(writeln (getenv (cadr (command-line))))
+(let ()
+(include "lib/unicode.scm")
+(write (getenv "GETENV_TEST_VALUE"))
+(newline)
+)

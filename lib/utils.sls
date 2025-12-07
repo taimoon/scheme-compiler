@@ -1,38 +1,33 @@
 (library
   (utils)
   (export
-    improper-list?
-    improper->proper
-    writeln
+    align-to-multiple
+    gensym*
     make-env
     extend-env
     extend-env*
     maybe-apply-env
     apply-env
-    
-    read-sexps-from-path
-    align-to-multiple
-    make-lcg
-    system*
-
-    random-string
-    symbol->id-symbol
-    string->id-string
-    generate-label
-
-    path-fileroot
+    apply-env*
+    improper-list?
+    improper->proper
+    flatmap
+    zip
+    applicate
+    path-parent
     path-filename
     path-extension
-    count-cons
-    rpad
-    measure-pass
-    lsort
-    partition
-    zip-k
-    mk-tmpname)
+    path-filestem
+    read-sexps-from-path
+    make-tempname
+    system*
+    maybe-getenv
+    )
   (import
-    (except (rnrs (6)) partition)
+    (rnrs (6))
     (only (chezscheme)
-      include add1 sub1 system format gensym
-      string-set! ash get-process-id iota))
+      get-process-id system getenv
+      include format ash string-set! gensym
+      andmap
+      sub1 add1))
   (include "utils.scm"))

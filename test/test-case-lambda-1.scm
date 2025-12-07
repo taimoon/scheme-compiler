@@ -1,3 +1,4 @@
+(let ()
 (define fn
   (let ((x -17)
         (y -23)
@@ -17,3 +18,4 @@
 (write-line (fn 29))
 (write-line (fn 29 31))
 (write-line (fn 29 31 37))
+)

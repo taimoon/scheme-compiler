@@ -1,94 +1,3 @@
-(define (writeln obj . args)
-  (let ((op (if (pair? args) (car args) (current-output-port))))
-    (write obj op)
-    (newline op)))
-
-(define (make-env) '())
-
-(define (extend-env xs vs env)
-  (cond
-    ((symbol? xs)
-     (cons (list xs vs) env))
-    ((pair? xs)
-     (if (pair? vs)
-         (cons (list (car xs) (car vs))
-               (extend-env (cdr xs) (cdr vs) env))
-         (error "extend-env" "bad value list" vs)))
-    (else env)))
-
-(define (extend-env* bs env)
-  (fold-right cons env bs))
-
-(define (maybe-apply-env x env)
-  (cond
-    ((null? env) #f)
-    ((not (and (pair? env) (pair? (car env))))
-     (error "maybe-apply-env" "improperly formed env"))
-    ((equal? x (caar env))
-     (car env))
-    (else (maybe-apply-env x (cdr env)))))
-
-(define (apply-env x env)
-  (let ((res (maybe-apply-env x env)))
-    (if res
-        (cadr res)
-        (error "apply-env" "unbound" x (map car env)))))
-
-(define partition (let ()
-  (define (partition-k pred xs k)
-    (if (null? xs)
-        (k '() '())
-        (let ()
-          (define (k* l r)
-            (if (pred (car xs))
-                (k (cons (car xs) l) r)
-                (k l (cons (car xs) r))))
-          (partition-k pred (cdr xs) k*))))
-  (case-lambda
-    ((pred xs) (partition-k pred xs list))
-    ((pred xs k) (partition-k pred xs k)))))
-
-(define lsort
-  (case-lambda
-    ((xs) (lsort xs <=))
-    ((xs cmp)
-     (let recur ((xs xs))
-      (cond
-        ((not (pair? xs)) '())
-        ((not (pair? (cdr xs))) xs)
-        ((not (pair? (cddr xs)))
-         (if (cmp (car xs) (cadr xs))
-             xs
-             (list (cadr xs) (car xs))))
-        (else
-         (let ((pvt (car xs)))
-          (partition (lambda (x) (cmp x pvt))
-            (cdr xs)
-            (lambda (ss bs)
-              (append (recur ss) (list pvt) (recur bs)))))))))))
-
-(define (zip-k xs ys k)
-  ;;; condition: (<= (length xs) (length ys))
-  (if (pair? xs)
-      (zip-k (cdr xs) (cdr ys)
-        (lambda (xs* ys*)
-          (k (cons (list (car xs) (car ys)) xs*)
-              ys*)))
-      (k '() ys)))
-
-(define (system* cmd . args)
-  (let ((r (system (apply format (cons cmd args)))))
-    (if (eq? r 0)
-        r
-        (exit r))))
-
-(define (read-sexps-from-path filename)
-  (let ((inp (open-input-file filename)))
-    (let recur ((obj (read inp)))
-      (if (eof-object? obj)
-          '()
-          (cons obj (recur (read inp)))))))
-
 (define (align-to-multiple alignment offset)
   (bitwise-and (+ offset (- alignment 1)) (- alignment)))
 
@@ -100,82 +9,76 @@
 (define rand
   (make-lcg 75 74 (+ (ash 2 16) 1) (get-process-id)))
 
-(define (random-bool)
-  (= (mod (rand) 2) (mod (rand) 2)))
-
 (define (random-string len)
   (let loop ((s (make-string len #\nul))
              (i (- len 1)))
     (if (< i 0)
         s
         (begin
-          (string-set! s i (integer->char
-                            (+ (if (random-bool) 97 65)
-                               (mod (rand) 26))))
+          (string-set! s i (integer->char (+ 97 (mod (rand) 26))))
           (loop s (- i 1))))))
 
-(define string->id-string
-  (let ()
-    (define extended-named-alphabets (map (lambda (b) (list (car b) (string-append "_" (cadr b) "_")))
-  '(
-    (#\! "bang")
-    (#\$ "dollar")
-    (#\% "cent")
-    (#\& "ampersand")
-    (#\* "star")
-    (#\+ "plus")
-    (#\- "dash")
-    (#\. "dot")
-    (#\/ "slash")
-    (#\: "colon")
-    (#\< "lt")
-    (#\= "eq")
-    (#\> "gt")
-    (#\? "query")
-    (#\@ "at")
-    (#\^ "hat")
-    (#\~ "tilde")
-    (#\_ "ul")
-    )))
-    (define (numeric-char? ch)
-      (and (char<=? #\0 ch) (char<=? ch #\9)))
-    (define (valid-id-char? ch)
-      (or (and (char<=? #\a ch) (char<=? ch #\z))
-          (and (char<=? #\A ch) (char<=? ch #\Z))
-          (numeric-char? ch)))
-    (define (char->valid-id-str ch)
-      (if (valid-id-char? ch)
-          (string ch)
-          (let ((res (assoc ch extended-named-alphabets)))
-            (if res
-                (cadr res)
-                "_"))))
-  (lambda (str) (apply string-append (cons "_" (map char->valid-id-str (string->list str)))))))
-
-(define (symbol->id-symbol sym)
-  (string->symbol (string->id-string (symbol->string sym))))
-
-(define generate-label
+;;; gensym* is like gensym but C-identifier syntax
+(define gensym*
   (let ((count 0)
         (rdm-str (random-string 8)))
     (lambda (prefix)
       (set! count (+ count 1))
       (string->symbol (format "~a_~a_~a" prefix rdm-str count)))))
 
-(define (string-index s ch/pred)
-  (define pred
-    (cond
-      ((char? ch/pred) (lambda (ch) (char=? ch ch/pred)))
-      ((procedure? ch/pred) ch/pred)
-      (else (error 'string-index
-                   "uknown argument ch/pred"
-                   ch/pred))))
-  (let loop ((i 0))
-    (cond
-      ((>= i (string-length s)) #f)
-      ((pred (string-ref s i)) i)
-      (else (loop (add1 i))))))
+(define (make-env) '())
 
+(define (extend-env xs vs env)
+  (cond
+    ((null? xs) env)
+    ((symbol? xs)
+     (cons (list xs vs) env))
+    ((pair? xs)
+     (if (pair? vs)
+         (cons (list (car xs) (car vs))
+               (extend-env (cdr xs) (cdr vs) env))
+         (error "extend-env" "bad value list" vs)))
+    (else
+     (error "extend-env" "bad symbol list" xs))))
+
+(define (extend-env* bs env)
+  (fold-right cons env bs))
+
+(define (maybe-apply-env x env)
+  (cond
+    ((null? env) #f)
+    ((not (pair? env))
+     (error "maybe-apply-env" "ill-formed" env))
+    ((not (pair? (car env)))
+     (error "maybe-apply-env" "improperly formed env"))
+    ((equal? x (caar env))
+     (car env))
+    (else (maybe-apply-env x (cdr env)))))
+
+(define (apply-env x env)
+  (let ((res (maybe-apply-env x env)))
+    (if res
+        (cadr res)
+        (error "apply-env" "unbound" x (map car env)))))
+
+(define (apply-env* x env $who)
+  (let ((res (maybe-apply-env x env)))
+    (if res
+        (cadr res)
+        (error "apply-env" $who "unbound" x (map car env)))))
+
+(define (improper-list? xs)
+  (if (pair? xs)
+      (improper-list? (cdr xs))
+      (not (null? xs))))
+
+(define (improper->proper xs)
+  (cond
+    ((null? xs) '())
+    ((pair? xs) (cons (car xs) (improper->proper (cdr xs))))
+    (else (list xs))))
+
+;;; SRFI-13
 (define (string-index-right s ch/pred)
   (define pred
     (cond
@@ -190,6 +93,8 @@
       ((pred (string-ref s i)) i)
       (else (loop (sub1 i))))))
 
+
+;;; filesystem path
 #|
   https://en.cppreference.com/w/cpp/filesystem/path#Decomposition
   https://www.boost.org/doc/libs/1_86_0/libs/filesystem/doc/tutorial.html#Class%20path-iterators-etc
@@ -208,63 +113,87 @@ Filename        baa.txt          baa.txt
 Stem            baa              baa
 Extension       .txt             .txt
 |#
-(define (path-last s)
-  (let ((maybe-idx (string-index-right s #\/)))
-    (if maybe-idx
-        (substring s (add1 maybe-idx) (string-length s))
-        s)))
 
-(define (path-first s)
+(define (path-parent s)
   (let ((maybe-idx (string-index-right s #\/)))
     (if maybe-idx
         (substring s 0 maybe-idx)
         "")))
 
 (define (path-filename s)
-  (path-last s))
+  (let ((maybe-idx (string-index-right s #\/)))
+    (if maybe-idx
+        (substring s (add1 maybe-idx) (string-length s))
+        s)))
 
 (define (path-extension s)
-  (let* ((s (path-last s))
+  (let* ((s (path-filename s))
          (maybe-idx (string-index-right s #\.)))
     (if maybe-idx
         (substring s (add1 maybe-idx) (string-length s))
         "")))
 
-(define (path-fileroot s)
-  (let* ((s (path-last s))
+(define (path-filestem s)
+  (let* ((s (path-filename s))
          (maybe-idx (string-index-right s #\.)))
     (if maybe-idx
         (substring s 0 maybe-idx)
         s)))
 
-;;; for perf measurement 
-(define (count-cons e)
-  (if (pair? e)
-      (add1 (+ (count-cons (car e)) (count-cons (cdr e))))
-      0))
+(define (flatmap f xs . xss)
+  (if (null? xss)
+      (let recur ((xs xs))
+        (if (pair? xs)
+            (append (f (car xs)) (recur (cdr xs)))
+            '()))
+      (let recur ((xs xs) (xss xss))
+        (cond
+          ((pair? xs)
+           (append (apply f (car xs) (map car xss))
+                    (recur (cdr xs) (map cdr xss))))
+          ((not (and (null? xs) (andmap null? xss)))
+           (error "flatmap" "expect-lists" xs xss))
+          (else '())))))
 
-(define (improper-list? xs)
-  (cond
-    ((null? xs) #f)
-    ((pair? xs) (improper-list? (cdr xs)))
-    (else #t)))
+(define (zip xs ys)
+  (if (and (pair? xs) (pair? ys))
+      (cons (list (car xs) (car ys))
+            (zip (cdr xs) (cdr ys)))
+      '()))
 
-(define (improper->proper xs)
-  (cond
-    ((null? xs) xs)
-    ((symbol? xs) (list xs))
-    ((pair? xs) (cons (car xs) (improper->proper (cdr xs))))
-    (else (error "improper->proper" "unknown object" xs))))
+(define (applicate f)
+  (lambda (vs) (apply f vs)))
 
-(define (rpad s pad-ch pad-sz)
-  (if (< (string-length s) pad-sz)
-      (string-append s (make-string (- pad-sz (string-length s)) pad-ch))
-      s))
+(define make-tempname
+  (let ((rdm-str (random-string 8))
+        (count 0))
+    (lambda (filestem ext)
+      (define filename
+        (string-append
+          (format "/tmp/scm-build-~a-~a-~a" rdm-str count filestem)
+            (if (equal? ext "") ext (string-append "." ext))))
+      (set! count (add1 count))
+      (if (file-exists? filename)
+          (make-tempname filestem ext)
+          filename))))
 
-(define (measure-pass $who)
-  (lambda (e) (format (current-error-port) "~a: ~a\n" (rpad (format "~a" $who) #\space 32) (count-cons e)) e))
+(define (system* cmd . args)
+  (let ((r (system (apply format (cons cmd args)))))
+    (if (eq? r 0)
+        r
+        (exit r))))
 
-(define (mk-tmpname f ext)
-  (string-append
-    (format "/dev/shm/scm-build-~a-~a" (path-fileroot f) (random-string 8))
-    (if (equal? ext "") ext (string-append "." ext))))
+(define (maybe-getenv var default)
+  (let ((val (getenv var)))
+    (if val
+        val
+        default)))
+
+(define (read-sexps-from-path path)
+  (let ((ip (open-input-file path)))
+    (let recur ((obj (read ip)))
+      (if (eof-object? obj)
+          (begin
+            (close-port ip)
+            '())
+          (cons obj (recur (read ip)))))))

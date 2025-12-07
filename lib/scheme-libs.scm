@@ -1,44 +1,21 @@
-;;;; number
-(define (abs x) (if (< x 0) (- 0 x) x))
-
-(define (max x . xs)
-  (define (max x y) (if (< x y) y x))
-  (let iter ((x x) (xs xs))
-    (if (not (pair? xs))
-        x
-        (iter (max x (car xs)) (cdr xs)))))
-
-;;;; cxr
-(define caar (lambda (x) (car (car x))))
-(define caaar (lambda (x) (car (car (car x)))))
-(define caaaar (lambda (x) (car (car (car (car x))))))
-(define cdaaar (lambda (x) (cdr (car (car (car x))))))
-(define cdaar (lambda (x) (cdr (car (car x)))))
-(define cadaar (lambda (x) (car (cdr (car (car x))))))
-(define cddaar (lambda (x) (cdr (cdr (car (car x))))))
-(define cdar (lambda (x) (cdr (car x))))
-(define cadar (lambda (x) (car (cdr (car x)))))
-(define caadar (lambda (x) (car (car (cdr (car x))))))
-(define cdadar (lambda (x) (cdr (car (cdr (car x))))))
-(define cddar (lambda (x) (cdr (cdr (car x)))))
-(define caddar (lambda (x) (car (cdr (cdr (car x))))))
-(define cdddar (lambda (x) (cdr (cdr (cdr (car x))))))
-(define cadr (lambda (x) (car (cdr x))))
-(define caadr (lambda (x) (car (car (cdr x)))))
-(define caaadr (lambda (x) (car (car (car (cdr x))))))
-(define cdaadr (lambda (x) (cdr (car (car (cdr x))))))
-(define cdadr (lambda (x) (cdr (car (cdr x)))))
-(define cadadr (lambda (x) (car (cdr (car (cdr x))))))
-(define cddadr (lambda (x) (cdr (cdr (car (cdr x))))))
-(define cddr (lambda (x) (cdr (cdr x))))
-(define caddr (lambda (x) (car (cdr (cdr x)))))
-(define caaddr (lambda (x) (car (car (cdr (cdr x))))))
-(define cdaddr (lambda (x) (cdr (car (cdr (cdr x))))))
-(define cdddr (lambda (x) (cdr (cdr (cdr x)))))
-(define cadddr (lambda (x) (car (cdr (cdr (cdr x))))))
-(define cddddr (lambda (x) (cdr (cdr (cdr (cdr x))))))
+(define (symbol=? s0 s1)
+  (cond
+    ((not (symbol? s0))
+     (error "symbol=?" "expect-symbol" s0))
+    ((not (symbol? s1))
+     (error "symbol=?" "expect-symbol" s1))
+    (else (eq? s0 s1))))
 
 ;;;; list
+(define list (lambda x x))
+
+(define list*
+  (lambda (x . xs)
+    (let recur ((x x) (xs xs))
+      (if (not (pair? xs))
+          x
+          (cons x (recur (car xs) (cdr xs)))))))
+
 (define (list? xs)
   (if (pair? xs)
       (list? (cdr xs))
@@ -54,13 +31,20 @@
       (proc (car xs) (fold-right proc init (cdr xs)))
       init))
 
-(define (append xs . xss)
+;;; TODO: fold-right* is CPS impl of fold-right. It is to workaround stack-call limit.
+(define (fold-right* proc init xs)
+  (let recur ((xs xs) (k (lambda (v) v)))
+    (if (pair? xs)
+        (recur (cdr xs) (lambda (init) (k (proc (car xs) init))))
+        (k init))))
+
+(define (append . xss)
   (if (null? xss)
-      xs
-      (let recur ((xs xs) (xss xss))
+      '()
+      (let recur ((xs (car xss)) (xss (cdr xss)))
         (if (null? xss)
             xs
-            (fold-right cons (recur (car xss) (cdr xss)) xs)))))
+            (fold-right* cons (recur (car xss) (cdr xss)) xs)))))
 
 (define (reverse xs)
   (fold-left (lambda (acm x) (cons x acm)) '() xs))
@@ -122,6 +106,9 @@
 (define (memq x xs)
   (memp (lambda (y) (eq? x y)) xs))
 
+(define (memv x xs)
+  (member x xs))
+
 (define (member x xs)
   (memp (lambda (y) (equal? x y)) xs))
 
@@ -147,6 +134,32 @@
     (else
      (filter pred (cdr xs)))))
 
+(define (partition pred xs)
+  (if (not (pair? xs))
+      (values '() '())
+      (call-with-values
+        (lambda () (partition pred (cdr xs)))
+        (lambda (rs ts)
+          (if (pred (car xs))
+              (values (cons (car xs) rs) ts)
+              (values rs (cons (car xs) ts)))))))
+
+(define (list-sort <= xs)
+  (let recur ((xs xs))
+    (cond
+      ((not (pair? xs)) '())
+      ((not (pair? (cdr xs))) xs)
+      ((not (pair? (cddr xs)))
+       (if (<= (car xs) (cadr xs))
+           xs
+           (list (cadr xs) (car xs))))
+      (else
+       (let ((pvt (car xs)))
+        (call-with-values
+          (lambda () (partition (lambda (x) (<= x pvt)) (cdr xs)))
+          (lambda (ss bs)
+            (append (recur ss) (list pvt) (recur bs)))))))))
+
 (define (for-each f xs . xss)
   (if (null? xss)
       (let loop ((xs xs))
@@ -161,16 +174,24 @@
               (apply f (cons (car xs) (map car xss)))
               (loop (cdr xs) (map cdr xss)))))))
 
-(define (for-all pred xs)
-  (if (not (pair? xs))
-      #t
-      (if (pred (car xs))
-          (for-all pred (cdr xs))
-          #f)))
+(define (for-all pred xs) (andmap pred xs))
 
-(define (exists pred xs) (not (for-all pred xs)))
+(define (exists pred xs) (ormap pred xs))
+
+(define (list-ref xs i)
+  (cond
+    ((not (pair? xs)) (error "list-ref" "bad-index"))
+    ((= i 0) (car xs))
+    (else (list-ref (cdr xs) (sub1 i)))))
 
 ;;; vector
+(define (vector-for-each f v)
+  (let iter ((i 0))
+    (if (< i (vector-length v))
+        (begin
+          (f (vector-ref v i))
+          (iter (add1 i))))))
+
 (define (vector-equal? v w)
   (cond
     ((eq? v w) #t)
@@ -261,6 +282,8 @@
 (define (substring s i j)
   (let* ((len (- j i))
          (t (make-string len #\nul)))
+    (if (< (string-length s) len)
+        (error "substring" "invalid range" i j s (string-length s)))
     (let loop ((i i) (k 0))
       (if (>= i j)
           t
@@ -347,15 +370,17 @@
 (define (integer->string i)
   (define (int->char x)
     (integer->char (+ x (char->integer #\0))))
+  (define (loop i acm)
+    (if (= i 0)
+        (list->string acm)
+        (loop (div i 10) (cons (int->char (abs (mod i 10))) acm))))
   (cond
     ((= i 0) "0")
     ((< i 0)
-     (string-append "-" (integer->string (- i))))
-    (else
-      (let loop ((i i) (acm '()))
-        (if (= i 0)
-            (list->string acm)
-            (loop (div i 10) (cons (int->char (mod i 10)) acm)))))))
+     ;;; NOTE: Doing the below might cause overflow here in current implementation and causing infinite recursion
+     ; (string-append "-" (integer->string (- i)))
+     (string-append "-" (loop (abs (div i 10)) (cons (int->char (abs (mod i 10))) '()))))
+    (else (loop i '()))))
 
 ;;;; formatter
 (define (obj->repr obj w?)
@@ -363,9 +388,7 @@
    (cond
      [(null? obj) "()"]
      [(integer? obj)
-      (if (< obj 0)
-          (string-append "-" (number->string (- obj)))
-          (number->string obj))]
+      (number->string obj)]
      [(char? obj) (string-append "#\\" (string obj))]
      [(boolean? obj) (if obj "#t" "f")]
      [(and (string? obj) w?) (string-append "\"" obj "\"")]
@@ -416,8 +439,7 @@
          (display (loop (car args) 0 0 (cdr args) '()) (current-output-port))]
         [(and (boolean? f) (not f) (pair? args) (string? (car args)))
          (loop (car args) 0 0 (cdr args) '())]
-        [else (error "format" "unknown args" f args)]))
-
+        [else (error "format" "unknown args" f (port? f) args)]))
 
 ;;;; misc
 (define (equal? x y)

@@ -1,0 +1,7 @@
+(let ()
+(define (fact-iter n acm)
+  (if (<= n 1)
+      (begin (collect) acm)
+      (fact-iter (- n 1) (* acm n))))
+(write (fact-iter 10 1)) (newline)
+)

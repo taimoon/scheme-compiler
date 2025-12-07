@@ -1,0 +1,5 @@
+(write (integer? 0)) (write (integer? 1)) (write (integer? -1)) (newline)
+(write (add1 0)) (newline)
+(write (integer? (add1 0))) (newline)
+(write (sub1 0)) (newline)
+(write (integer? (sub1 0))) (newline)

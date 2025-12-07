@@ -1,7 +1,0 @@
-(let ()
-(define (writeln e)
-  (write e) (newline))
-(define xs '(1 2 3))
-(define ys '(4 5 6))
-(writeln `((,xs ,xs) ,xs ,@ys))
-)

@@ -1,187 +1,211 @@
-#include<stdlib.h>
-#include<stdio.h>
-#include<stdint.h>
-#include<assert.h>
-#include<stdbool.h>
-#include<string.h>
-typedef intptr_t word_t;
-typedef intptr_t* ptr_t;
-#if defined(__x86_64__)
+#include <assert.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <inttypes.h>
+#include <string.h>
+
+#if defined(__x86_64__) || defined(__aarch64__)
 #define FIXNUM_MASK     0b00000111
-#define FIXNUM_TAG      0b00000000
-#define FIXNUM_SHIFT    3
-#elif defined(__aarch64__)
-#define FIXNUM_MASK     0b00000111
-#define FIXNUM_TAG      0b00000000
-#define FIXNUM_SHIFT    3
-#elif defined(__riscv) && __riscv_xlen == 64
-#define FIXNUM_MASK     0b00000111
-#define FIXNUM_TAG      0b00000000
 #define FIXNUM_SHIFT    3
 #else
 #define FIXNUM_MASK     0b00000011
-#define FIXNUM_TAG      0b00000000
 #define FIXNUM_SHIFT    2
 #endif
-#define AVX_ALIGNMENT   32
+
+typedef intptr_t word_t;
+#define PTR_MASK        0b111
+
+#define FIXNUM_TAG      0b000
+#define PAIR_TAG        0b001
+#define FLO_TAG         0b010
+#define SYM_TAG         0b011
+// OCCUPIED             0b100 // OCCUPIED by fixnums on 32-bits machines
+#define CLOS_TAG        0b101
+#define IMM_TAG         0b110
+#define OBJ_TAG         0b111
+// IMM_TAG              0bxxxxx110
+#define BOOL_TAG        0b00000110
+#define CHAR_TAG        0b00001110
+#define NIL_TAG         0b00010110
+#define EOF_TAG         0b00011110
+#define VOID_TAG        0b00100110
+#define UNBOUND_TAG     0b01000110
+
 #define IMM_SHIFT       8
-#define IMM_TAG         0b00000111
 #define IMM_MASK        0b11111111
-#define EOF_TAG         0b00000111
-#define CHAR_TAG        0b00001111
-#define BOOL_TAG        0b00011111
-#define NIL_TAG         0b00111111
-#define EMPTY_TAG       0b11111111
-#define EMPTY           (word_t)-1
-#define PTR_MASK        0b00000111
-#define PAIR_TAG        0b00000001
-#define VEC_TAG         0b00000010
-#define STR_TAG         0b00000011
-#define SYM_TAG         0b00000101
-#define CLOS_TAG        0b00000110
 #define FALSE_IMM       BOOL_TAG
 #define TRUE_IMM        ((1 << IMM_SHIFT) | BOOL_TAG)
-int FLIP_COUNT = 0;
-int HEAP_SIZE;
-word_t *free_ptr, *HEAP_START, *HEAP_END, *fromspace_start, *fromspace_end, *tospace_start, *tospace_end, *scan_ptr;
-int ARGC;
-char **ARGV;
-word_t ARGS;
-extern word_t* global_table[];
-word_t *GC_CELLS;
-word_t *BOT_EBP;
 
-inline static word_t align_to_multiple(word_t alignment, word_t offset){
+#define PAIR_MASK       PTR_MASK
+#define OBJ_MASK        0b111
+#define VEC_TAG         0b000
+#define BYTEVEC_TAG     0b001
+#define STR_TAG         0b010
+#define STR_MASK        FIXNUM_MASK
+#define VEC_MASK        FIXNUM_MASK
+#define BYTEVEC_MASK    FIXNUM_MASK
+
+word_t HEAP_WORDS_MAX = 4 << 20;
+word_t HEAP_WORDS = 20 << 10; // NOTE: this is minimum required to bootstrap the lib
+word_t *free_ptr, *scan_ptr;
+word_t *fromspace_start, *fromspace_end;
+word_t *tospace_start, *tospace_end;
+static bool *gc_markers;
+word_t _s_str2sym = 0;
+word_t ARGS = NIL_TAG;
+word_t *BOT_FP = NULL;
+word_t *LBL_TBL = NULL;
+bool _DEBUG_LIVE_RATIO_FLAG = false;
+
+word_t s_collect(word_t sz, word_t * const sp, word_t * const fp);
+void s_trace_stack(word_t * const sp, word_t * const fp, word_t * const bot_fp);
+void s_profile_heap(word_t sz);
+
+static inline word_t align_to_multiple(word_t alignment, word_t offset) {
     return (offset + (alignment - 1)) & -alignment;
 }
 
-void init_cmd_ln(){
-    word_t *ptr;
-    int len;
-    ARGS = (word_t)free_ptr | VEC_TAG;
-    ptr = free_ptr;
-    free_ptr = (word_t*)align_to_multiple(8,(word_t)(free_ptr + ARGC + 1));
-
-    ptr[0] = ARGC << FIXNUM_SHIFT;
-    for(int i = ARGC-1; i >= 0; --i){
-        ptr[i+1] = (word_t)free_ptr | STR_TAG;
-        len = strlen(ARGV[i]);
-        free_ptr[0] = len << FIXNUM_SHIFT;
-        char *dest = (char*)(free_ptr + 1);
-        strncpy(dest, ARGV[i], len + 1);
-
-        free_ptr = free_ptr + 1;
-        free_ptr = (word_t*)((char*)free_ptr + len + 1);
-        free_ptr = (word_t*)align_to_multiple(AVX_ALIGNMENT, (word_t)free_ptr);
-    }
+static inline  word_t min(word_t x, word_t y) {
+    return x < y ? x : y;
 }
 
-void init_heap(){
-    char *s = getenv("HEAP_SIZE");
-    if(s != NULL){
-        // sscanf(s, "%d", &HEAP_SIZE); doesn't work for x86_64
-        HEAP_SIZE = atoi(s);
-        assert(HEAP_SIZE > 0);
-        HEAP_SIZE = align_to_multiple(8, HEAP_SIZE);
-    }
-    else{
-        HEAP_SIZE = 0xffff8;    // 15 MB
-        // HEAP_SIZE = 0x8ffff8;   // 150 MB
-    }
-    GC_CELLS = aligned_alloc(AVX_ALIGNMENT, HEAP_SIZE * sizeof(word_t));
-    free_ptr = aligned_alloc(AVX_ALIGNMENT, HEAP_SIZE * 2 * sizeof(word_t*));
-    
-    // double estimated_mem_sz = (HEAP_SIZE * (2 * sizeof(word_t*) + sizeof(GC_CELL_T))) / (1024 * 1024);
-    // fprintf(stderr, "HEAP_SIZE:%d HEAP_MEM_SIZE: %.2fMB\n", HEAP_SIZE, estimated_mem_sz);
-    HEAP_START = free_ptr;
-    HEAP_END = HEAP_START + HEAP_SIZE * 2;
-    fromspace_start = free_ptr;
-    fromspace_end = free_ptr + HEAP_SIZE;
-    tospace_start = free_ptr + HEAP_SIZE;
-    tospace_end = free_ptr + HEAP_SIZE * 2;
-    assert(sizeof(word_t) == sizeof(word_t*));
-    assert(sizeof(word_t*) == sizeof(void*));
-    assert((word_t)stdin % 8 == 0 && "unaligned stdin");
-    assert((word_t)stdout % 8 == 0 && "unaligned stdout");
-    assert((word_t)stderr % 8 == 0 && "unaligned stderr");
-    assert((word_t)free_ptr % 8 == 0);
-    assert((word_t)fromspace_start % 8 == 0);
-    assert((word_t)fromspace_end % 8 == 0);
-    assert((word_t)tospace_start % 8 == 0);
-    assert((word_t)tospace_end % 8 == 0);
-    init_cmd_ln();
-    return;
+static inline word_t max(word_t x, word_t y) {
+    return x > y ? x : y;
 }
 
-// FFI
-const char* to_cstr(word_t x){
-    assert((x & PTR_MASK) == STR_TAG);
-    word_t *ptr = (word_t*)(x - STR_TAG);
-    char *s = (char*)(ptr+1);
-    return s;
-}
-
-word_t to_scm_str(const char *s){
+word_t s_cstr_to_bytevec(const char *s) {
     word_t len = strlen(s);
-    word_t res = (word_t)free_ptr | STR_TAG;
-    *free_ptr = len << FIXNUM_SHIFT;
-    char* d = (char*)(free_ptr + 1);
-    strcpy(d, s);
-    free_ptr = free_ptr + 1;
-    free_ptr = (word_t*)((char*)free_ptr + len + 1);
-    free_ptr = (word_t*)align_to_multiple(AVX_ALIGNMENT, (word_t)free_ptr);
-    return res;
-}
-
-#include <sys/unistd.h>
-word_t s_getpid(){
-    return getpid() << FIXNUM_SHIFT;
-}
-
-word_t s_getenv(word_t x){
-    const char* val = getenv(to_cstr(x));
-    if(val == NULL){
-        return FALSE_IMM;
+    if(fromspace_end - free_ptr < sizeof(word_t) + len) {
+        fprintf(stderr, "[%s:%d] %s: ", __FILE__, __LINE__, __FUNCTION__);
+        fprintf(stderr, "insufficient memory\n");
+        abort();
     }
-    else{
-        return to_scm_str(val);
+    word_t *_w = free_ptr;
+    free_ptr = (word_t*)align_to_multiple(8, (word_t)free_ptr + sizeof(word_t) + len);
+    char *dst = (char*)(_w + 1);
+    _w[0] = (len << FIXNUM_SHIFT) | BYTEVEC_TAG;
+    for(int i = 0; i < len; ++i) {
+        dst[i] = s[i];
+    }
+    return (word_t)_w | OBJ_TAG;
+}
+
+void _scm_init(word_t argc, char ** argv) {
+    char *v;
+    v = getenv("HEAP_WORDS_MAX");
+    HEAP_WORDS_MAX = v == NULL ? HEAP_WORDS_MAX : strtol(v, NULL, 10) << 10;
+    v = getenv("HEAP_WORDS");
+    HEAP_WORDS = v == NULL ? HEAP_WORDS : strtol(v, NULL, 10) << 10;
+    v = getenv("_DEBUG_LIVE_RATIO_FLAG");
+    _DEBUG_LIVE_RATIO_FLAG = v != NULL && strcmp(v, "ON") == 0;
+    fromspace_start = aligned_alloc(8, HEAP_WORDS * sizeof(word_t));
+    fromspace_end = fromspace_start + HEAP_WORDS;
+    tospace_start = aligned_alloc(8, HEAP_WORDS * sizeof(word_t));
+    tospace_end = tospace_start + HEAP_WORDS;
+    gc_markers = aligned_alloc(8, HEAP_WORDS * sizeof(bool));
+    free_ptr = fromspace_start;
+    ARGS = NIL_TAG;
+    for(int i = argc - 1; i >= 0; --i) {
+        word_t tmp = s_cstr_to_bytevec(argv[i]);
+        free_ptr[1] = ARGS;
+        free_ptr[0] = tmp;
+        ARGS = (word_t)free_ptr | PAIR_TAG;
+        free_ptr += 2;
     }
 }
 
-void s_exit(word_t v){
-    exit(v >> FIXNUM_SHIFT);
-}
-
-word_t s_system(word_t x){
-    const char* cmd = to_cstr(x);
-    return system(cmd) << FIXNUM_SHIFT;
-}
-
-word_t s_cmd_ln(){
-    return ARGS;
-}
-
-word_t s_strcmp(word_t x, word_t y){
-    assert((x & PTR_MASK) == STR_TAG);
-    assert((y & PTR_MASK) == STR_TAG);
-    word_t* xptr = (word_t*)(x - STR_TAG);
-    word_t* yptr = (word_t*)(y - STR_TAG);
-    if(xptr[0] != yptr[0]){
-        return BOOL_TAG;
+int utf32_to_utf8(uint32_t c32, uint8_t *buf) {
+    if(c32 <= 0x7F) {
+        buf[0] = (uint8_t)c32;
+        return 1;
+    } 
+    else if(c32 <= 0x7FF) {
+        buf[0] = 0xC0 | (c32 >> 6);
+        buf[1] = 0x80 | (c32 & 0x3F);
+        return 2;
+    } 
+    else if(c32 <= 0xFFFF) {
+        // Exclude UTF-16 surrogate range (invalid in UTF-8)
+        if (c32 >= 0xD800 && c32 <= 0xDFFF) return 0;
+        buf[0] = 0xE0 | (c32 >> 12);
+        buf[1] = 0x80 | ((c32 >> 6) & 0x3F);
+        buf[2] = 0x80 | (c32 & 0x3F);
+        return 3;
+    } 
+    else if (c32 <= 0x10FFFF) {
+        buf[0] = 0xF0 | (c32 >> 18);
+        buf[1] = 0x80 | ((c32 >> 12) & 0x3F);
+        buf[2] = 0x80 | ((c32 >> 6) & 0x3F);
+        buf[3] = 0x80 | (c32 & 0x3F);
+        return 4;
+    } 
+    else {
+        // Invalid Unicode scalar value
+        return 0;
     }
-    else{
-        int res = strncmp((char*)(xptr + 1), (char*)(yptr + 1), xptr[0]);
-        return ((res == 0) << IMM_SHIFT) | BOOL_TAG;
-    }
-
 }
 
-void s_fwrite(word_t v, FILE *fptr){
-    if((v & FIXNUM_MASK) == FIXNUM_TAG){
-        fprintf(fptr, "%d", v >> FIXNUM_SHIFT);
+static word_t s_write_char(word_t v, FILE* fptr) {
+    assert((v & IMM_MASK) == CHAR_TAG);
+    uint32_t ch = v >> IMM_SHIFT;
+    uint8_t buf[4];
+    int len = utf32_to_utf8(ch, buf);
+    if(len == 0) {
+        // � to indicate unknown utf32
+        len = utf32_to_utf8(0xFFFD, buf);
     }
-    else if((v & IMM_MASK) == CHAR_TAG){
-        char ch = v >> IMM_SHIFT;
+    fwrite(buf, 1, len, fptr);
+    return VOID_TAG;
+}
+
+word_t s_write(word_t v, FILE* fptr) {
+    if((v & FIXNUM_MASK) == FIXNUM_TAG) {
+        fprintf(fptr, "%" PRIdPTR, v >> FIXNUM_SHIFT);
+    }
+    else if((v & PAIR_MASK) == PAIR_TAG) {
+        word_t *ptr = (word_t*)(v - PAIR_TAG);
+        word_t car = ptr[0];
+        word_t cdr = ptr[1];
+        
+        fprintf(fptr, "(");
+        s_write(car, fptr);
+        
+        while((cdr & PAIR_MASK) == PAIR_TAG) {
+            fprintf(fptr, " ");
+            ptr = (word_t*)(cdr - PAIR_TAG);
+            car = ptr[0];
+            cdr = ptr[1];
+            s_write(car, fptr);
+        }
+        if((cdr & IMM_MASK) == NIL_TAG) {
+            fprintf(fptr, ")");
+        }
+        else {
+            fprintf(fptr, " . ");
+            s_write(cdr, fptr);
+            fprintf(fptr, ")");
+        }
+    }
+    else if((v & PTR_MASK) == CLOS_TAG) {
+        fprintf(fptr, "#<procedure %p>", (void*)*(word_t*)(v - CLOS_TAG));
+    }
+    else if((v & PTR_MASK) == SYM_TAG) {
+        v = ((word_t*)(v - SYM_TAG))[2];
+        assert((v & OBJ_MASK) == OBJ_TAG && (*(word_t*)(v - OBJ_TAG) & STR_MASK) == STR_TAG);
+        word_t len = *(word_t*)(v - OBJ_TAG) - STR_TAG;
+        uint32_t *ptr = (uint32_t*)((word_t*)(v - OBJ_TAG) + 1);
+        assert((len & FIXNUM_MASK) == FIXNUM_TAG);
+        assert(len >= 0);
+        len = len >> FIXNUM_SHIFT;
+        for(int i = 0; i < len; ++i) {
+            assert((ptr[i] & IMM_MASK) == CHAR_TAG);
+            s_write_char(ptr[i], fptr);
+        }
+    }
+    else if((v & IMM_MASK) == CHAR_TAG) {
+        uint32_t ch = v >> IMM_SHIFT;
         if(ch == ' '){
             fprintf(fptr, "#\\space");
         }
@@ -192,376 +216,715 @@ void s_fwrite(word_t v, FILE *fptr){
             fprintf(fptr, "#\\newline");
         }
         else{
-            fprintf(fptr, "#\\%c", ch);
+            fprintf(fptr, "#\\");
+            s_write_char(v, fptr);
         }
     }
-    else if((v & IMM_MASK) == BOOL_TAG){
-        if(v >> IMM_SHIFT){
-            fprintf(fptr, "#t");
-        }else{
-            fprintf(fptr, "#f");
-        }
+    else if((v & IMM_MASK) == BOOL_TAG) {
+        fprintf(fptr, v >> IMM_SHIFT ? "#t" : "#f");
     }
-    else if((v & IMM_MASK) == NIL_TAG){
+    else if((v & IMM_MASK) == NIL_TAG) {
         fprintf(fptr, "()");
     }
-    else if((v & PTR_MASK) == PAIR_TAG){
-        word_t *ptr = (word_t*)(v - PAIR_TAG);
-        word_t car = ptr[0];
-        word_t cdr = ptr[1];
-        
-        fprintf(fptr, "(");
-        s_fwrite(car, fptr);
-        
-        while((cdr & PTR_MASK) == PAIR_TAG){
-            fprintf(fptr, " ");
-            ptr = (word_t*)(cdr - PAIR_TAG);
-            car = ptr[0];
-            cdr = ptr[1];
-            s_fwrite(car, fptr);
-        }
-        if((cdr & IMM_MASK) == NIL_TAG){
-            fprintf(fptr, ")");
-        }
-        else{
-            fprintf(fptr, " . ");
-            s_fwrite(cdr, fptr);
-            fprintf(fptr, ")");
-        }
+    else if((v & IMM_MASK) == EOF_TAG) {
+        fprintf(fptr, "#!eof");
     }
-    else if((v & PTR_MASK) == STR_TAG){
-        word_t *ptr = (word_t*)(v - STR_TAG);
-        assert((ptr[0] & FIXNUM_MASK) == FIXNUM_TAG);
-        int len = ptr[0] >> FIXNUM_SHIFT;
-        char *s = (char*)(ptr+1);
+    else if((v & IMM_MASK) == VOID_TAG) {
+        fprintf(fptr, "#<void>");
+    }
+    else if((v & IMM_MASK) == UNBOUND_TAG) {
+        fprintf(fptr, (v >> IMM_SHIFT) == 1 ? "#<ENTRY-MARK>" : "#<UNBOUND>");
+    }
+    else if ((v & OBJ_MASK) == OBJ_TAG && (*(word_t*)(v - OBJ_TAG) & STR_MASK) == STR_TAG) {
+        word_t len = *(word_t*)(v - OBJ_TAG) - STR_TAG;
+        uint32_t *ptr = (uint32_t*)((word_t*)(v - OBJ_TAG) + 1);
+        assert((len & FIXNUM_MASK) == FIXNUM_TAG);
+        assert(len >= 0);
+        len = len >> FIXNUM_SHIFT;
         putc('"', fptr);
-        for(int i = 0; i < len && s[i] != '\0'; ++i){
-            switch (s[i]) {
-                case '\n': fprintf(fptr, "\\n"); break;
-                case '\t': fprintf(fptr, "\\t"); break;
-                case '\r': fprintf(fptr, "\\r"); break;
-                case '\"': fprintf(fptr, "\\\""); break;
-                case '\\': fprintf(fptr, "\\\\"); break;
-                default:
-                    // non-printable ASCII
-                    if (s[i] < 32 || s[i] > 126){
-                        fprintf(fptr, "\\x%02x", (unsigned char)s[i]);
-                    }
-                    else{
-                        putc(s[i], fptr);
-                    }
+        for(int i = 0; i < len; ++i) {
+            assert((ptr[i] & IMM_MASK) == CHAR_TAG);
+            uint32_t ch = ptr[i] >> IMM_SHIFT;
+            if(ch == '\n') fprintf(fptr, "\\n");
+            else if(ch == '\t') fprintf(fptr, "\\t");
+            else if(ch == '\r') fprintf(fptr, "\\r");
+            else if(ch == '\"') fprintf(fptr, "\\\"");
+            else if(ch == '\\') fprintf(fptr, "\\\\");
+            else {
+                s_write_char(ptr[i], fptr);
             }
         }
         putc('"', fptr);
     }
-    else if((v & PTR_MASK) == SYM_TAG){
-        word_t *ptr = (word_t*)(v - SYM_TAG);
-        char *s = (char*)(ptr+1);
-        fprintf(fptr, "%s", s);
-    }
-    else if((v & PTR_MASK) == VEC_TAG){
-        word_t *ptr = (word_t*)(v - VEC_TAG);
-        word_t len = ptr[0] >> FIXNUM_SHIFT;
-        ptr = ptr+1;
+    else if ((v & OBJ_MASK) == OBJ_TAG && (*(word_t*)(v - OBJ_TAG) & VEC_MASK) == VEC_TAG) {
+        word_t len = *(word_t*)(v - OBJ_TAG) - VEC_TAG;
+        word_t *ptr = ((word_t*)(v - OBJ_TAG) + 1);
+        assert((len & FIXNUM_MASK) == FIXNUM_TAG);
+        assert(len >= 0);
+        len = len >> FIXNUM_SHIFT;
         fprintf(fptr, "#(");
-        for(;len > 0; --len){
-            s_fwrite(*ptr++, fptr);
-            if(len != 1){
+        for(int i = 0; i < len; ++i) {
+            s_write(ptr[i], fptr);
+            if(i != len - 1)
                 fprintf(fptr, " ");
-            }
         }
         fprintf(fptr, ")");
     }
-    else if((v & PTR_MASK) == CLOS_TAG){
-        word_t *ptr = (word_t*)(v - CLOS_TAG);
-        word_t len = ptr[1] >> FIXNUM_SHIFT;
-        fprintf(fptr, "<procedure %x %d>", ptr[0], len);
+    else if ((v & OBJ_MASK) == OBJ_TAG && (*(word_t*)(v - OBJ_TAG) & BYTEVEC_MASK) == BYTEVEC_TAG) {
+        word_t len = *(word_t*)(v - OBJ_TAG) - BYTEVEC_TAG;
+        uint8_t *ptr = (uint8_t*)((word_t*)(v - OBJ_TAG) + 1);
+        assert((len & FIXNUM_MASK) == FIXNUM_TAG);
+        assert(len >= 0);
+        len = len >> FIXNUM_SHIFT;
+        fprintf(fptr, "#vu8(");
+        for(int i = 0; i < len; ++i) {
+            fprintf(fptr, "%d", ptr[i]);
+            if(i != len - 1)
+                fprintf(fptr, " ");
+        }
+        fprintf(fptr, ")");
     }
-    else{
-        fprintf(stderr, "%s unknown object: %x\n", __FUNCTION__, v);
-        assert(false);
+    else {
+        fprintf(stderr, "[%s:%d] %s: unknown object %p\n", __FILE__, __LINE__, __FUNCTION__, (void*) v);
+        abort();
     }
+    return VOID_TAG;
 }
 
-void s_fwriteln(word_t v, FILE *fptr){
-    s_fwrite(v, fptr);
+word_t s_writeln(word_t v, FILE* fptr) {
+    s_write(v, fptr);
     putc('\n', fptr);
+    return VOID_TAG;
 }
 
-word_t s_write(word_t v){
-    s_fwrite(v, stdout);
-    return 0;
-}
-
-word_t s_fnewline(FILE *fptr){
+word_t s_newline(FILE* fptr) {
     putc('\n', fptr);
-    return 0;
+    return VOID_TAG;
 }
 
-word_t s_newline(){
-    putc('\n', stdout);
-    return 0;
+word_t construct_vararg(int target_argc, int argc, word_t *sp, word_t *fp) {
+    assert(argc >= 0 && target_argc >= 0);
+    assert((fp - 1) > sp && ((fp - 1) - sp) == argc);
+    assert(target_argc <= argc + 1);
+    // (1 2 3 4) => (cons 1 (cons 2 (cons 3 (cons 4 '()))))
+    // 2 * n
+    s_collect(2 * sizeof(word_t) * ((argc + 1 - target_argc) + 1), sp ,fp);
+    word_t v = NIL_TAG;
+    for(int i = 0; i < (argc + 1 - target_argc); ++i) {
+        free_ptr[1] = v;
+        free_ptr[0] = sp[i];
+        v = (word_t)free_ptr | PAIR_TAG;
+        free_ptr += 2;
+    }
+    return v;
 }
 
-void s_proc_arg_err(){
-    fprintf(stderr, "bad procedure calling\n");
-    exit(1);
+word_t shift_values(int argc, word_t * const sp, word_t * const fp) {
+    for(int i = 0; i < argc; ++i) {
+        fp[-(i+2)] = sp[(argc - 1) - i];
+    }
+    return argc;
 }
 
-void s_make_string_size_err(word_t v){
-    fprintf(stderr, "make-string expect non-negative fixnum but got: ");
-    s_fwriteln(v, stderr);
-    exit(1);
+word_t set_s_str2sym(word_t v) {
+    _s_str2sym = v;
+    return VOID_TAG;
 }
 
-void s_make_vector_size_err(word_t v){
-    fprintf(stderr, "make-vector expect non-negative fixnum but got: ");
-    s_fwriteln(v, stderr);
-    exit(1);
+typedef struct s_bytevec {
+    word_t len;
+    uint8_t *ptr;
+} s_bytevec;
+
+static inline word_t _s_fixnum_to_word(word_t v) {
+    assert((v & FIXNUM_MASK) == FIXNUM_TAG);
+    return v >> FIXNUM_SHIFT;
 }
 
-word_t s_stdin(){
-    return (word_t)stdin;
+word_t s_make_string(word_t fx, word_t c){
+    uint32_t wc = (uint32_t)c;
+    int len = _s_fixnum_to_word(fx);
+    assert(len >= 0);
+    word_t *_w = free_ptr;
+    free_ptr = (word_t*)align_to_multiple(8, (word_t)free_ptr + sizeof(word_t) + sizeof(uint32_t) * len);
+    _w[0] = fx | STR_TAG;
+    uint32_t *dst = (uint32_t*)(_w + 1);
+    for (int i = 0; i < len; ++i) {
+        dst[i] = wc;
+    }
+    word_t w = (word_t)_w | OBJ_TAG;
+    return w;
 }
 
-word_t s_stdout(){
-    return (word_t)stdout;
+word_t s_make_vector(word_t fx, word_t x){
+    int len = _s_fixnum_to_word(fx);
+    assert(len >= 0);
+    word_t *_w = free_ptr;
+    free_ptr = (word_t*)align_to_multiple(8, (word_t)(free_ptr + len + 1));
+    _w[0] = fx | VEC_TAG;
+    for (int i = 0; i < len; ++i) {
+        _w[i+1] = x;
+    }
+    word_t w = (word_t)_w | OBJ_TAG;
+    return w;
 }
 
-word_t s_stderr(){
-    return (word_t)stderr;
+word_t s_make_bytevector(word_t fx, word_t x){
+    int len = _s_fixnum_to_word(fx);
+    assert(len >= 0);
+    word_t *_w = free_ptr;
+    free_ptr = (word_t*)align_to_multiple(8, (word_t)free_ptr + sizeof(word_t) + len);
+    uint8_t *dst = (uint8_t*)(_w + 1);
+    _w[0] = (len << FIXNUM_SHIFT) | BYTEVEC_TAG;
+    if (x != FALSE_IMM) {
+        uint8_t b = (uint8_t)_s_fixnum_to_word(x);
+        for(int i = 0; i < len; ++i) {
+            dst[i] = b;
+        }
+    }
+    word_t w = (word_t)_w | OBJ_TAG;
+    return w;
 }
 
-word_t s_fopen(word_t f, word_t mode){
-    FILE *fptr = fopen(to_cstr(f), to_cstr(mode));
-    assert((word_t)fptr%8 == 0);
+static inline s_bytevec _s_bytevec_to_cstruct(word_t v) {
+    assert((v & OBJ_MASK) == OBJ_TAG);
+    assert((*(word_t*)(v - OBJ_TAG) & BYTEVEC_MASK) == BYTEVEC_TAG);
+    word_t len = *(word_t*)(v - OBJ_TAG) - BYTEVEC_TAG;
+    uint8_t *ptr = (uint8_t*)((word_t*)(v - OBJ_TAG) + 1);
+    assert((len & FIXNUM_MASK) == FIXNUM_TAG && len >= 0);
+    len = len >> FIXNUM_SHIFT;
+    return (s_bytevec){.len = len, .ptr = ptr};
+}
+
+static inline char* _s_bytevec_to_cstr(word_t v) {
+    s_bytevec buf = _s_bytevec_to_cstruct(v);
+    assert(buf.ptr[buf.len - 1] == '\0');
+    return (char*)buf.ptr;
+}
+
+extern void L_implicit_restore_stack(void);
+extern void L_explicit_restore_stack(void);
+
+static const int CONT_HDR_SZ = 5;
+
+static inline int _s_cont_stack_size(word_t* cont) {
+    assert(cont[0] == (word_t)L_explicit_restore_stack);
+    return (cont[1] >> FIXNUM_SHIFT) - CONT_HDR_SZ;
+}
+
+static inline word_t* _s_cont_stack_sp(word_t* cont) {
+    assert(cont[0] == (word_t)L_explicit_restore_stack);
+    return cont + 2 + CONT_HDR_SZ;
+}
+
+static inline word_t* _s_cont_stack_fp(word_t* cont) {
+    assert(cont[0] == (word_t)L_explicit_restore_stack);
+    return _s_cont_stack_sp(cont) + cont[2];
+}
+
+static inline word_t* _s_cont_stack_bot_fp(word_t* cont) {
+    assert(cont[0] == (word_t)L_explicit_restore_stack);
+    return _s_cont_stack_sp(cont) + _s_cont_stack_size(cont) - 2;
+}
+
+void s_trace_cont(word_t _cont) {
+    assert((_cont & PTR_MASK) == CLOS_TAG);
+    word_t *cont = (word_t*)(_cont - CLOS_TAG);
+    s_trace_stack(_s_cont_stack_sp(cont), _s_cont_stack_fp(cont), _s_cont_stack_bot_fp(cont));
+}
+
+word_t s_reify_cont(word_t clos, word_t ret, word_t *sp, word_t *fp) {
+    bool is_tail = sp == fp;
+    word_t ebx = free_ptr[0];
+    assert(BOT_FP >= fp && fp >= sp);
+    bool is_tail_cc = (
+        is_tail
+        && fp == BOT_FP - 4
+        && fp[5] == (word_t)abort
+        && fp[3] == 0xCA11
+        && fp[1] == (word_t)L_implicit_restore_stack
+        && fp[0] == (word_t)BOT_FP
+    );
+    if(is_tail_cc) {
+        word_t v = BOT_FP[-2];
+        assert((v & PTR_MASK) == CLOS_TAG);
+        assert(*(word_t*)(v - CLOS_TAG) == (word_t)L_explicit_restore_stack);
+        ebx = fp[-1];
+        BOT_FP[-5] = ebx;
+        BOT_FP[-6] = clos;
+        BOT_FP[-7] = v;
+        return clos;
+    }
+    if(is_tail) {
+        assert(ret == fp[1]);
+        ebx = fp[-1];
+        sp = fp + 2;
+        fp = (word_t*)*fp;
+    }
+    // s_trace_stack(sp, fp, BOT_FP);
+    int stack_size = (BOT_FP - sp) + 2;
+    assert(BOT_FP + 1 == sp + stack_size - 1);
+    word_t *cont = free_ptr;
+    int free_sz = fromspace_end - free_ptr;
+    int req_sz = 2 + CONT_HDR_SZ + stack_size;
+    if(free_sz < req_sz) {
+        fprintf(stderr, "[%s:%d] %s: ", __FILE__, __LINE__, __FUNCTION__);
+        fprintf(stderr, "insufficient memory\n");
+        s_profile_heap(req_sz << FIXNUM_SHIFT);
+        abort();
+    }
+    free_ptr = (word_t*)align_to_multiple(8, (word_t)(free_ptr + 2 + CONT_HDR_SZ + stack_size));
+    cont[0] = (word_t)L_explicit_restore_stack;
+    cont[1] = (CONT_HDR_SZ + stack_size) << FIXNUM_SHIFT;
+    cont[2] = fp - sp;
+    cont[3] = ret;
+    cont[4] = *BOT_FP;
+    cont[5] = (word_t)sp;
+    cont[6] = ebx;
+    word_t *cont_sp = _s_cont_stack_sp(cont);
+    for(int i = 0; i < stack_size; ++i) {
+        cont_sp[i] = sp[i];
+    }
+    for(word_t *_fp = fp; _fp < BOT_FP; _fp = (word_t*)*_fp) {
+        int curr_frame_size = _fp - sp;
+        int next_frame_size = (word_t*)*_fp - sp;
+        cont_sp[curr_frame_size] = (word_t)(cont_sp + next_frame_size);
+    }
+    word_t v = (word_t)cont | CLOS_TAG;
+    // s_trace_cont(v);
+    BOT_FP[1] = (word_t)abort;
+    BOT_FP[0] = (word_t)fp;
+    BOT_FP[-1] = 0xCA11;
+    BOT_FP[-2] = v;
+    BOT_FP[-3] = (word_t)L_implicit_restore_stack;
+    BOT_FP[-4] = (word_t)BOT_FP;
+    BOT_FP[-5] = ebx;
+    BOT_FP[-6] = clos;
+    BOT_FP[-7] = v;
+    return clos;
+}
+
+word_t s_apply_cont(word_t * const _sp) {
+    word_t len = _s_fixnum_to_word(tospace_start[0]);
+    word_t _cont = tospace_start[1];
+    word_t val = tospace_start[2];
+    // fprintf(stderr, "len = %d\n", len);
+    // for(int i = 0; i < len; ++i) {
+    //     s_writeln(tospace_start[i+1], stderr);
+    // }
+    // s_trace_cont(_cont);
+    assert((_cont & PTR_MASK) == CLOS_TAG);
+    word_t *cont = (word_t*)(_cont - CLOS_TAG);
+    assert(cont[0] == (word_t)L_explicit_restore_stack);
+    word_t *cont_stk = _s_cont_stack_sp(cont);
+    int stack_size = _s_cont_stack_size(cont);
+    assert((BOT_FP - _sp) + 2 == (stack_size + (len - 1) + 5));
+    assert((BOT_FP - (_sp + (len - 1) + 5)) + 2 == stack_size);
+    word_t * const sp = _sp + (len - 1) + 5;
+    // NOTE:
+    // sp , ret , fp  , ebx , clos  , v0  , v1  , ...
+    // 0  , 1   , 2   , 3   , 4     , 5   , 6   , ...
+    // why `len - 1` and `i + 2`?
+    // Incoming len includes continuation which we don't want to copy over
+    for(int i = 0; i < len - 1; ++i) {
+        sp[-i-5] = tospace_start[i + 2];
+    }
+    for(int i = 0; i < stack_size; ++i) {
+        sp[i] = cont_stk[i];
+    }
+    word_t *fp = _s_cont_stack_fp(cont);
+    word_t *bot_fp = _s_cont_stack_bot_fp(cont);
+    for(word_t* _fp = fp; _fp < bot_fp; _fp = (word_t*)*_fp){
+        int cur_frame_sz = _fp - cont_stk;
+        int nxt_frame_sz = (word_t*)*_fp - cont_stk;
+        sp[cur_frame_sz] = (word_t)(sp + nxt_frame_sz);
+    }
+    *BOT_FP = cont[4];
+    // s_trace_stack(sp, sp + cont[2], BOT_FP);
+    free_ptr[0] = len - 1;
+    free_ptr[1] = cont[5]; // sp
+    free_ptr[2] = (word_t)(sp + cont[2]); // fp
+    free_ptr[3] = cont[6]; // ebx
+    free_ptr[4] = cont[3]; // ret
+    return val;
+}
+
+void s_exit(word_t v) {
+    exit((v & FIXNUM_MASK) == FIXNUM_TAG ? v >> FIXNUM_SHIFT : v);
+}
+
+word_t s_system(word_t cmd) {
+    return system(_s_bytevec_to_cstr(cmd)) << FIXNUM_SHIFT;
+}
+
+#include <sys/unistd.h>
+word_t s_getpid() {
+    return getpid() << FIXNUM_SHIFT;
+}
+
+word_t s_getenv(word_t x){
+    const char* val = getenv(_s_bytevec_to_cstr(x));
+    return val == NULL ? FALSE_IMM : s_cstr_to_bytevec(val);
+}
+
+word_t s_fopen(word_t filename, word_t mode) {
+    FILE *fptr = fopen(_s_bytevec_to_cstr(filename), _s_bytevec_to_cstr(mode));
+    assert(((word_t)fptr % 8) == 0);
     return (word_t)fptr;
 }
 
-word_t s_fclose(word_t f){
-    fclose((FILE*)f);
-    return 0;
+word_t s_fclose(FILE *fptr) {
+    fclose(fptr);
+    return VOID_TAG;
 }
 
-word_t s_read_char(FILE *fptr){
-    return fgetc(fptr) << FIXNUM_SHIFT;
-}
-
-word_t s_fwrite_char(word_t ch, FILE *fptr){
-    char c = (char)(ch >> IMM_SHIFT);
-    putc(c, fptr);
-    return 0;
-}
-
-word_t s_write_char(word_t ch){
-    return s_fwrite_char(ch, stdout);
-}
-
-word_t s_ungetc(word_t ch, FILE *fptr){
-    char c = (char)(ch >> IMM_SHIFT);
-    int v = ungetc(c, fptr);
-    return v << FIXNUM_SHIFT;
-}
-
-word_t s_make_string(word_t size, word_t ch){
-    assert((size & FIXNUM_MASK) == FIXNUM_TAG);
-    assert((ch & IMM_MASK) == CHAR_TAG);
-    char c = ch >> IMM_SHIFT;
-    int k = size >> FIXNUM_SHIFT;
-    assert(k >= 0);
-
-    word_t res = (word_t)free_ptr | STR_TAG;
-    free_ptr[0] = size;
-    char *d = (char*)(free_ptr + 1);
-    memset(d, c, k);
-    d[k] = '\0';
-    free_ptr = free_ptr + 1;
-    free_ptr = (word_t*)((char*)free_ptr + k + 1);
-    free_ptr = (word_t*)align_to_multiple(8,(word_t)free_ptr);
-    return res;
-}
-
-word_t s_make_vector(word_t size, word_t obj){
-    assert((size & FIXNUM_MASK) == FIXNUM_TAG);
-    int k = size >> FIXNUM_SHIFT;
-    assert(k >= 0);
-
-    word_t res = (word_t)free_ptr | VEC_TAG;
-    free_ptr[0] = size;
-    for(int i = 0; i < k; ++i){
-        free_ptr[i+1] = obj;
+word_t s_fread(word_t v, word_t fx_start, word_t fx_end, FILE* fptr) {
+    word_t start = _s_fixnum_to_word(fx_start);
+    word_t end = _s_fixnum_to_word(fx_end);
+    s_bytevec buf = _s_bytevec_to_cstruct(v);
+    assert(start >= 0 && end >= 0 && start <= end);
+    assert(end - start <= buf.len);
+    size_t sz = fread(buf.ptr + start, 1, end - start, fptr);
+    if(sz == end - start) {
+        return sz << FIXNUM_SHIFT;
     }
-    free_ptr = (word_t*)align_to_multiple(8,(word_t)(free_ptr + k + 1));
+    else if(feof(fptr)) {
+        return EOF_TAG;
+    }
+    else {
+        return VOID_TAG;
+    }
+}
+
+word_t s_fwrite(word_t v, word_t fx_start, word_t fx_end, FILE* fptr) {
+    word_t start = _s_fixnum_to_word(fx_start);
+    word_t end = _s_fixnum_to_word(fx_end);
+    s_bytevec buf = _s_bytevec_to_cstruct(v);
+    assert(start >= 0 && end >= 0 && start <= end);
+    assert(end - start <= buf.len);
+    fwrite(buf.ptr + start, 1, end - start, fptr);
+    return VOID_TAG;
+}
+
+#include <dlfcn.h>
+word_t s_dlopen(word_t inp, word_t entry) {
+    const char *_inp = _s_bytevec_to_cstr(inp);
+    const char *_ent = _s_bytevec_to_cstr(entry);
+    void *handle = dlopen(_inp, RTLD_NOW);
+    if (!handle) {
+        fprintf(stderr, "\n[%s:%d] %s: dlopen failed: %s %s\n", __FILE__, __LINE__, __func__, _inp, dlerror());
+        abort();
+    }
+    void *_entry_fn = dlsym(handle, _ent);
+    if (!_entry_fn) {
+        fprintf(stderr, "\n[%s:%d] %s: dlsym failed: %s %s\n", __FILE__, __LINE__, __func__, _ent, dlerror());
+        dlclose(handle);
+        abort();
+    }
+    free_ptr[0] = (word_t) _entry_fn;
+    free_ptr[1] = 0;
+    word_t res = (word_t)free_ptr | CLOS_TAG;
+    free_ptr = (word_t*)align_to_multiple(8, (word_t)(free_ptr + 2));
     return res;
 }
 
 // GC
-bool is_immediate(word_t v){
-    return ((v & FIXNUM_MASK) == FIXNUM_TAG) || ((v & PTR_MASK) == IMM_TAG);
+static inline bool is_nonheap(word_t v) {
+    return (v & FIXNUM_MASK) == FIXNUM_TAG || (v & OBJ_MASK) == IMM_TAG;
 }
 
-word_t copy_obj(word_t v){
-    if(is_immediate(v)){
+word_t s_copy(const word_t v) {
+    if(is_nonheap(v)) {
         return v;
     }
     word_t *ptr = (word_t*)(v & ~PTR_MASK);
-    bool is_heap_ptr = HEAP_START <= ptr && ptr < HEAP_END;
-    if(!is_heap_ptr){
-        fprintf(stderr, "%s not a heap pointer: %p 0x%lx\n", __FUNCTION__, ptr, v);
-        assert(is_heap_ptr);
-    }
-    bool is_tospace_ptr = tospace_start <= ptr && ptr < tospace_end;
-    if(!is_tospace_ptr){
-        s_fwriteln(v, stderr);
-        assert(is_tospace_ptr);
-    }
-    assert(free_ptr < scan_ptr);
     assert((word_t)free_ptr % 8 == 0);
     assert(fromspace_start <= free_ptr && free_ptr < fromspace_end);
-    int pos = ptr - tospace_start;
-    
-    if((v & PTR_MASK) == SYM_TAG){
-        word_t w = copy_obj(v - SYM_TAG + STR_TAG) - STR_TAG + SYM_TAG;
+    assert(fromspace_start <= scan_ptr && scan_ptr <= fromspace_end);
+    if(free_ptr >= (scan_ptr - 1)) {
+        fprintf(stderr, "[%s:%d] %s: ", __FILE__, __LINE__, __FUNCTION__);
+        fprintf(stderr, "scan_ptr touches free_ptr :(\n");
+        abort();
+    }
+    assert(tospace_start <= ptr && ptr < tospace_end);
+    int idx = ptr - tospace_start;
+    if(gc_markers[idx]) {
+        return *ptr;
+    }
+    gc_markers[idx] = true;
+    if((v & PAIR_MASK) == PAIR_TAG) {
+        word_t *ptr = (word_t*)(v - PAIR_TAG);
+        word_t *_w = free_ptr;
+        free_ptr = (word_t*)align_to_multiple(8, (word_t)(free_ptr + 2));
+        _w[0] = ptr[0];
+        _w[1] = ptr[1];
+        word_t w = (word_t)_w | PAIR_TAG;
+        *ptr = w;
+        *--scan_ptr = w;
         return w;
     }
-    if(GC_CELLS[pos] != EMPTY){
-        return GC_CELLS[pos];
-    }
-    else if((v & PTR_MASK) == PAIR_TAG){
-        word_t *w = free_ptr;
-        free_ptr += 2;
-        w[0] = ptr[0];
-        w[1] = ptr[1];
-
-        GC_CELLS[pos] = ((word_t)w) | PAIR_TAG;
-        *--scan_ptr = GC_CELLS[pos];
-        return GC_CELLS[pos];
-    }
-    else if((v & PTR_MASK) == STR_TAG){
-        word_t *ptr = (word_t*)(v - STR_TAG);
-        word_t fx_len = ptr[0];
-        char *s = (char*)(ptr+1);
-        assert((fx_len & FIXNUM_MASK) == FIXNUM_TAG);
-        int len = fx_len >> FIXNUM_SHIFT;
-        assert(len >= 0 && s[len] == '\0');
-
-        word_t *w = free_ptr;
-        char *d = (char*)(free_ptr + 1);
-
-        free_ptr = free_ptr + 1;
-        free_ptr = (word_t*)((char*)free_ptr + len + 1);
-        free_ptr = (word_t*)align_to_multiple(8,(word_t)free_ptr);
-
-        w[0] = fx_len;
-
-        strncpy(d, s, len+1);
-
-        GC_CELLS[pos] = (word_t)w | STR_TAG;
-        return GC_CELLS[pos];
-    }
-    else if((v & PTR_MASK) == SYM_TAG){
-        word_t w = copy_obj(v - SYM_TAG + STR_TAG) - STR_TAG + SYM_TAG;
-        return w;
-    }
-    else if((v & PTR_MASK) == VEC_TAG){
-        word_t *ptr = (word_t*)(v - VEC_TAG);
-        word_t fx_len = ptr[0];
-        assert((fx_len & FIXNUM_MASK) == FIXNUM_TAG);
-        int len = fx_len >> FIXNUM_SHIFT;
-
-        word_t *w = free_ptr;
-
-        free_ptr = free_ptr + 1 + len;
-        free_ptr = (word_t*)align_to_multiple(8,(word_t)free_ptr);
-
-        // to also copy the vector length
-        for(int i = 0; i < len+1; ++i){
-            w[i] = ptr[i];
-        }
-        GC_CELLS[pos] = (word_t)w | VEC_TAG;
-        *--scan_ptr = GC_CELLS[pos];
-        return GC_CELLS[pos];
-    }
-    else if((v & PTR_MASK) == CLOS_TAG){
+    else if((v & PTR_MASK) == CLOS_TAG) {
         word_t *ptr = (word_t*)(v - CLOS_TAG);
-        assert((ptr[0] & PTR_MASK) == 0);
-        word_t fx_len = ptr[1];
-        assert((fx_len  & FIXNUM_MASK) == FIXNUM_TAG);
-        int len = fx_len >> FIXNUM_SHIFT;
-
-        word_t *dest = free_ptr;
-
-        free_ptr = free_ptr + 2 + len;
-        free_ptr = (word_t*)align_to_multiple(8,(word_t)free_ptr);
-
-        for(int i = 0; i < len + 2; ++i){
-            dest[i] = ptr[i];
+        word_t len = _s_fixnum_to_word(ptr[1]);
+        word_t *_w = free_ptr;
+        free_ptr = (word_t*)align_to_multiple(8, (word_t)(free_ptr + len + 2));
+        _w[0] = ptr[0];
+        _w[1] = ptr[1];
+        for(int i = 0; i < len; ++i) {
+            _w[i + 2] = ptr[i + 2];
         }
-        GC_CELLS[pos] = (word_t)dest | CLOS_TAG;
-        *--scan_ptr = GC_CELLS[pos];
-        return GC_CELLS[pos];
+        if(ptr[0] == (word_t)L_explicit_restore_stack) {
+            word_t *bot_fp = _s_cont_stack_bot_fp(ptr);
+            word_t *sp = _s_cont_stack_sp(ptr);
+            word_t *cont_sp = _s_cont_stack_sp(_w);
+            for(word_t *_fp = _s_cont_stack_fp(ptr); _fp < bot_fp; _fp = (word_t*)*_fp) {
+                int curr_frame_size = _fp - sp;
+                int next_frame_size = (word_t*)*_fp - sp;
+                cont_sp[curr_frame_size] = (word_t)(cont_sp + next_frame_size);
+            }
+        }
+        word_t w = (word_t)_w | CLOS_TAG;
+        *ptr = w;
+        *--scan_ptr = w;
+        return w;
+    }
+    else if((v & PTR_MASK) == SYM_TAG) {
+        word_t *ptr = (word_t*)(v - SYM_TAG);
+        word_t *_w = free_ptr;
+        free_ptr = (word_t*)align_to_multiple(8, (word_t)(free_ptr + 4));
+        word_t val = ptr[0];
+        word_t hash = ptr[1];
+        word_t name = ptr[2];
+        _s_fixnum_to_word(hash);
+        _w[0] = val;
+        _w[1] = hash;
+        _w[2] = name;
+        _w[3] = 0;
+        word_t w = (word_t)_w | SYM_TAG;
+        *ptr = w;
+        *--scan_ptr = w;
+        return w;
+    }
+    else if ((v & OBJ_MASK) == OBJ_TAG && (*(word_t*)(v - OBJ_TAG) & VEC_MASK) == VEC_TAG) {
+        word_t len = _s_fixnum_to_word(*(word_t*)(v - OBJ_TAG) - VEC_TAG);
+        assert(len >= 0);
+        word_t *_w = free_ptr;
+        free_ptr = (word_t*)align_to_multiple(8, (word_t)(free_ptr + len + 1));
+        word_t *src = ((word_t*)(v - OBJ_TAG) + 1);
+        _w[0] = (len << FIXNUM_SHIFT) | VEC_TAG;
+        word_t *dst = _w + 1;
+        for(int i = 0; i < len; ++i) {
+            dst[i] = src[i];
+        }
+        word_t w = (word_t)_w | OBJ_TAG;
+        word_t *ptr = (word_t*)(v - OBJ_TAG);
+        *ptr = w;
+        *--scan_ptr = w;
+        return w;
+    }
+    else if((v & OBJ_MASK) == OBJ_TAG && (*(word_t*)(v - OBJ_TAG) & STR_MASK) == STR_TAG) {
+        word_t len = _s_fixnum_to_word(*(word_t*)(v - OBJ_TAG) - STR_TAG);
+        assert(len >= 0);
+        uint32_t *src = (uint32_t*)((word_t*)(v - OBJ_TAG) + 1);
+        word_t *_w = free_ptr;
+        free_ptr = (word_t*)align_to_multiple(8, (word_t)free_ptr + sizeof(word_t) + sizeof(uint32_t) * len);
+        uint32_t *dst = (uint32_t*)(_w + 1);
+        _w[0] = (len << FIXNUM_SHIFT) | STR_TAG;
+        for(int i = 0; i < len; ++i) {
+            dst[i] = src[i];
+        }
+        word_t w = (word_t)_w | OBJ_TAG;
+        word_t *ptr = (word_t*)(v - OBJ_TAG);
+        *ptr = w;
+        return w;
+    }
+    else if((v & OBJ_MASK) == OBJ_TAG && (*(word_t*)(v - OBJ_TAG) & BYTEVEC_MASK) == BYTEVEC_TAG) {
+        word_t len = _s_fixnum_to_word(*(word_t*)(v - OBJ_TAG) - BYTEVEC_TAG);
+        assert(len >= 0);
+        uint8_t *src = (uint8_t*)((word_t*)(v - OBJ_TAG) + 1);
+        word_t *_w = free_ptr;
+        free_ptr = (word_t*)align_to_multiple(8, (word_t)free_ptr + sizeof(word_t) + len);
+        uint8_t *dst = (uint8_t*)(_w + 1);
+        _w[0] = (len << FIXNUM_SHIFT) | BYTEVEC_TAG;
+        for(int i = 0; i < len; ++i) {
+            dst[i] = src[i];
+        }
+        word_t w = (word_t)_w | OBJ_TAG;
+        word_t *ptr = (word_t*)(v - OBJ_TAG);
+        *ptr = w;
+        return w;
     }
     else {
-        fprintf(stderr, "%s unknown object %p\n", __FUNCTION__, v);
-        exit(1);
+        fprintf(stderr, "\n[%s:%d] %s: unknown object %p %"PRIdPTR"\n", __FILE__, __LINE__, __func__, (void*) v, v & PTR_MASK);
+        abort();
     }
 }
 
-static inline void collect_scan_pointer(){
-    while(scan_ptr < fromspace_end){
-        word_t v = *(scan_ptr++);
-        assert(!is_immediate(v));
-        word_t *ptr = (word_t*)(v & ~PTR_MASK);
-        if((v & PTR_MASK) == PAIR_TAG){
-            ptr[0] = copy_obj(ptr[0]);
-            ptr[1] = copy_obj(ptr[1]);
+static inline void _s_collect_stack(word_t * const sp, word_t * const fp, word_t * const bot_fp) {
+    word_t *_fp;
+    int i;
+    for(i = 0, _fp = fp; sp + i < bot_fp; ++i) {
+        if(sp + i == _fp - 1) {
+            _fp = (word_t*)*_fp;
+            i += 2;
         }
-        else if((v & PTR_MASK) == VEC_TAG){
-            word_t fx_len = ptr[0];
-            assert((fx_len  & FIXNUM_MASK) == FIXNUM_TAG);
-            int len = fx_len >> FIXNUM_SHIFT;
-            for(int i = 0; i < len; ++i){
-                ptr[i+1] = copy_obj(ptr[i+1]);
+        else {
+            sp[i] = s_copy(sp[i]);
+        }
+    }
+}
+
+void s_trace_stack(word_t * const sp, word_t * const fp, word_t * const bot_fp) {
+    fprintf(stderr, "------------------------------------------\n");
+    fprintf(stderr, "STACK(sp = %p fp = %p %s = %p)\n", sp, fp, bot_fp == BOT_FP ? "BOT_FP" : "bot_fp", bot_fp);
+    int i;
+    word_t *_fp;
+    for(i = 0, _fp = fp; sp + i < bot_fp; ++i) {
+        int local_th = (sp + i) - _fp;
+        if(sp + i == _fp - 1) {
+            fprintf(stderr, "%p: fp[%+d] = %p\n", sp + i, local_th, (word_t*)_fp[-1]);
+            fprintf(stderr, "%p: fp[%+d] = %p\n", sp + i + 1, 0, (word_t*)_fp[0]);
+            fprintf(stderr, "%p: fp[%+d] = %p\n", sp + i + 2, 1, (word_t*)_fp[1]);
+            _fp = (word_t*)*_fp;
+            i += 2;
+            fprintf(stderr, "------------------------------------------\n");
+        }
+        else {
+            fprintf(stderr, "%p: fp[%+d] = ", sp + i, local_th);
+            s_writeln(sp[i], stderr);
+        }
+    }
+    fprintf(stderr, "%s = %p\n", bot_fp == BOT_FP ? "BOT_FP" : "bot_fp", bot_fp);
+}
+
+static inline void _s_collect_scan_ptr() {
+    while(scan_ptr < fromspace_end) {
+        assert(free_ptr < scan_ptr);
+        word_t v = *scan_ptr; ++scan_ptr;
+        assert(!is_nonheap(v));
+        if((v & PAIR_MASK) == PAIR_TAG) {
+            word_t *ptr = (word_t*)(v - PAIR_TAG);
+            ptr[0] = s_copy(ptr[0]);
+            ptr[1] = s_copy(ptr[1]);
+        }
+        else if((v & PTR_MASK) == CLOS_TAG) {
+            word_t *ptr = (word_t*)(v - CLOS_TAG);
+            if(ptr[0] == (word_t)L_explicit_restore_stack) {
+                _s_collect_stack(_s_cont_stack_sp(ptr), _s_cont_stack_fp(ptr), _s_cont_stack_bot_fp(ptr));
+            }
+            else {
+            word_t len = _s_fixnum_to_word(ptr[1]);
+            for(int i = 0; i < len; ++i) {
+                ptr[i + 2] = s_copy(ptr[i + 2]);
+                }
             }
         }
-        else if((v & PTR_MASK) == CLOS_TAG){
-            assert((ptr[0] & PTR_MASK) == 0);
-            word_t fx_len = ptr[1];
-            assert((fx_len  & FIXNUM_MASK) == FIXNUM_TAG);
-            int len = fx_len >> FIXNUM_SHIFT;
-            for(int i = 0; i < len; ++i){
-                ptr[i+2] = copy_obj(ptr[i+2]);
+        else if((v & PTR_MASK) == SYM_TAG) {
+            word_t *ptr = (word_t*)(v - SYM_TAG);
+            ptr[0] = s_copy(ptr[0]);
+            ptr[1] = s_copy(ptr[1]);
+            ptr[2] = s_copy(ptr[2]);
+            ptr[3] = s_copy(ptr[3]);
+            word_t name = ptr[2];
+            assert((name & OBJ_MASK) == OBJ_TAG && (*(word_t*)(name - OBJ_TAG) & STR_MASK) == STR_TAG);
+        }
+        else if ((v & OBJ_MASK) == OBJ_TAG && (*(word_t*)(v - OBJ_TAG) & VEC_MASK) == VEC_TAG) {
+            word_t len = _s_fixnum_to_word(*(word_t*)(v - OBJ_TAG) - VEC_TAG);
+            assert(len >= 0);
+            word_t *ptr = ((word_t*)(v - OBJ_TAG) + 1);
+            assert(len >= 0);
+            for(int i = 0; i < len; ++i) {
+                ptr[i] = s_copy(ptr[i]);
             }
-        }
-        else if((v & PTR_MASK) == STR_TAG){
-            assert((v & PTR_MASK) != STR_TAG);
-        }
-        else if((v & PTR_MASK) == SYM_TAG){
-            assert((v & PTR_MASK) != SYM_TAG);
         }
         else{
-            fprintf(stderr, "%s unknown object %p\n", __FUNCTION__, v);
-            assert(false);
+            fprintf(stderr, "\n[%s:%d] %s: unknown object %p %"PRIdPTR"\n", __FILE__, __LINE__, __func__, (void*) v, v & PTR_MASK);
+            abort();
         }
     }
 }
 
-static inline word_t _max(word_t x, word_t y){
-    return x < y ? y : x;
+int HEAP_RESIZE_CNT = 0;
+int FLIP_CNT = 0;
+
+void s_profile_heap(word_t sz) {
+    int used_space = free_ptr - fromspace_start;
+    int marker_mem = fromspace_end - fromspace_start;
+    int heap_mem =  ((fromspace_end - fromspace_start) + (tospace_end - tospace_start)) * sizeof(word_t) + marker_mem;
+    int heap_mem_max =  2 * HEAP_WORDS_MAX * sizeof(word_t) + HEAP_WORDS_MAX;
+    fprintf(stderr, " HEAP_WORDS (k) = %"PRIdPTR, HEAP_WORDS >> 10);
+    fprintf(stderr, " markbit (b) = %d", marker_mem);
+    fprintf(stderr, " used (kobj) = %d", used_space >> 10);
+    fprintf(stderr, " from (kobj) = %d", marker_mem >> 10);
+    fprintf(stderr, " to (kobj) = %"PRIdPTR, (tospace_end - tospace_start) >> 10);
+    fprintf(stderr, " req (obj) = %"PRIdPTR, sz >> FIXNUM_SHIFT);
+    fprintf(stderr, " max (mb) = %d", heap_mem_max >> 20);
+    fprintf(stderr, " heap (mb) = %d", heap_mem >> 20);
+    fprintf(stderr, " resize = %d", HEAP_RESIZE_CNT);
+    fprintf(stderr, " flip = %d", FLIP_CNT);
+    fprintf(stderr, " \n");
 }
 
-word_t gc_flip(word_t fx_size, word_t *esp, word_t *ebp){
-    assert((fx_size & FIXNUM_MASK) == FIXNUM_TAG);
-    int size = fx_size >> FIXNUM_SHIFT;
-    assert(size == -1 || (size >= 0 && size % 8 == 0));
-    int free_sz = fromspace_end - free_ptr;
-    int min_size = 64;
-    bool flip_condition;
-    flip_condition = size < 0;
-    size = size > 0 ? _max(size / 8, min_size) : min_size;
-    flip_condition = flip_condition || (free_sz < size);
-    if(!flip_condition){
+void s_trace_root(word_t * const sp, word_t * const fp) {
+    fprintf(stderr, "------------------------------------------\n");
+    int unit_cnt;
+    word_t *ptr;
+    fprintf(stderr, "LBL_TBL\n");
+    for(ptr = LBL_TBL, unit_cnt = 0; ptr != NULL; ptr = (word_t*)ptr[0], ++unit_cnt) {
+        fprintf(stderr, "%p: LBL_TBL[%d][0] = %p\n", ptr, unit_cnt, (word_t*)ptr[0]);
+        fprintf(stderr, "%p: LBL_TBL[%d][1] = %"PRIdPTR"\n", ptr + 1, unit_cnt, ptr[1]);
+        for(int i = 0; i < ptr[1]; ++i) {
+            fprintf(stderr, "%p: LBL_TBL[%d][%d] = ", ptr + (i + 2), unit_cnt, i + 2);
+            s_writeln(ptr[i+2], stderr);
+        }
+    }
+    s_trace_stack(sp, fp, BOT_FP);
+}
+
+static inline void resize_tospace() {
+    int tospace_words = (tospace_end - tospace_start);
+    if(tospace_words >= HEAP_WORDS_MAX || tospace_words >= HEAP_WORDS) {
+        return;
+    }
+    word_t *tospace_start_new = aligned_alloc(8, HEAP_WORDS * sizeof(word_t));
+    bool *gc_markers_new = aligned_alloc(8, HEAP_WORDS * sizeof(bool));
+    if(gc_markers_new != NULL && tospace_start_new != NULL) {
+        free(tospace_start);
+        free(gc_markers);
+        tospace_start = tospace_start_new;
+        tospace_end = tospace_start_new + HEAP_WORDS;
+        gc_markers = gc_markers_new;
+    }
+    else {
+        free(gc_markers_new);
+        free(tospace_start_new);
+        fprintf(stderr, "[%s:%d] %s: ", __FILE__, __LINE__, __FUNCTION__);
+        fprintf(stderr, "cannot resize\n");
+        abort();
+    }
+    tospace_start_new = NULL;
+    gc_markers_new = NULL;
+    assert(tospace_start != NULL && tospace_end != NULL && gc_markers != NULL);
+}
+
+// s_collect returns freed size in addition to garbage collection
+// fx_sz : byte size requested; not in fixnum*
+word_t s_collect(const word_t _sz, word_t * const sp, word_t * const fp) {
+    bool forced_collect = _sz == FALSE_IMM;
+    const word_t min_req_sz = 32 * sizeof(word_t);
+    const word_t req_sz = forced_collect ? min_req_sz : max(_sz, min_req_sz);
+    assert(_s_fixnum_to_word(req_sz) > 0);
+    assert(sp < fp && fp < BOT_FP);
+    assert(_s_fixnum_to_word(req_sz) > 0 && sp < fp && fp < BOT_FP);
+    int free_space_old = fromspace_end - free_ptr;
+    int used_space_old = free_ptr - fromspace_start;
+    if((!forced_collect && req_sz <= (free_space_old * sizeof(word_t)))){
         return 0;
+    }
+    FLIP_CNT++;
+    resize_tospace();
+    for(int i = 0; i < HEAP_WORDS; ++i) {
+        gc_markers[i] = false;
     }
     word_t *tmp;
     tmp = fromspace_start;
@@ -570,50 +933,89 @@ word_t gc_flip(word_t fx_size, word_t *esp, word_t *ebp){
     tmp = fromspace_end;
     fromspace_end = tospace_end;
     tospace_end = tmp;
-
-    free_ptr = fromspace_start;
     scan_ptr = fromspace_end;
-
-    memset(GC_CELLS, EMPTY, HEAP_SIZE * sizeof(GC_CELLS[0]));
-
-    ARGS = copy_obj(ARGS);
-    for(int i = 0; global_table[i] != 0; ++i) {
-        *global_table[i] = copy_obj(*global_table[i]);
-    }
-    collect_scan_pointer();
-
-    for(int i = 0; esp + i < BOT_EBP;){
-        if(esp + i == ebp){
-            ebp = (word_t*)esp[i];
-            i += 2;
-        } else {
-            esp[i] = copy_obj(esp[i]);
-            collect_scan_pointer();
-            i += 1;
+    free_ptr = fromspace_start;
+    _s_str2sym = s_copy(_s_str2sym);
+    ARGS = s_copy(ARGS);
+    for(word_t *ptr = LBL_TBL; ptr != NULL; ptr = (word_t*)ptr[0]) {
+        for(int i = 0; i < ptr[1]; ++i) {
+            ptr[i+2] = s_copy(ptr[i+2]);
         }
     }
-    free_sz = fromspace_end - free_ptr;
-    // ++FLIP_COUNT;
-    // fprintf(stderr, "flip: %d TIMES %d KB \n", FLIP_COUNT, free_sz * sizeof(word_t) / 1024);
-    if(free_sz <= size){
-        fprintf(stderr, "HEAP FULL! free=%d requested_size=%d\n", free_sz, size);
-        exit(1);
+    _s_collect_stack(sp, fp, BOT_FP);
+    _s_collect_scan_ptr();
+    int free_space_new = fromspace_end - free_ptr;
+    int used_space_new = free_ptr - fromspace_start;
+    int freed_size = used_space_old - used_space_new;
+    
+    if(_DEBUG_LIVE_RATIO_FLAG) {
+        s_profile_heap(req_sz);
+        fprintf(stderr, "live_ratio=%f\n", (float)used_space_new / (fromspace_end - fromspace_start));
     }
-    return 0;
+    /* The math here
+    used_space_new / (fromspace_end - fromspace_start) > d / n
+    n * used_space_new > d * (fromspace_end - fromspace_start)
+     */
+    int d = 50;
+    int n = 100;
+    if(n * used_space_new > d * (fromspace_end - fromspace_start) && HEAP_WORDS < HEAP_WORDS_MAX) {
+        HEAP_WORDS = min(2 * HEAP_WORDS, HEAP_WORDS_MAX);
+        HEAP_RESIZE_CNT++;
+        resize_tospace();
+        s_collect(FALSE_IMM, sp, fp);
+        free_space_new = fromspace_end - free_ptr;
+        used_space_new = free_ptr - fromspace_start;
+        freed_size = used_space_old - used_space_new;
+        assert(n * used_space_new < d * (fromspace_end - fromspace_start));
+    }
+    if(req_sz <= free_space_new * sizeof(word_t)) {
+        return freed_size << FIXNUM_SHIFT;
+    }
+    else if((HEAP_WORDS_MAX - used_space_new) * sizeof(word_t) < req_sz) {
+        fprintf(stderr, "[%s:%d] %s: ", __FILE__, __LINE__, __FUNCTION__);
+        fprintf(stderr, "insufficient memory\n");
+        s_profile_heap(req_sz);
+        abort();
+    }
+    else {
+        assert(HEAP_WORDS - used_space_new == free_space_new);
+        while((HEAP_WORDS - used_space_new) * sizeof(word_t) < req_sz) {
+            HEAP_WORDS = min(2 * HEAP_WORDS, HEAP_WORDS_MAX);
+            if(HEAP_WORDS == HEAP_WORDS_MAX) break;
+            HEAP_RESIZE_CNT++;
+        }
+        assert((HEAP_WORDS - used_space_new) * sizeof(word_t) >= req_sz);
+        resize_tospace();
+        assert((tospace_end - tospace_start) == HEAP_WORDS);
+        s_collect(FALSE_IMM, sp, fp);
+        assert((fromspace_end - fromspace_start) == HEAP_WORDS);
+        return freed_size << FIXNUM_SHIFT;
+    }
 }
 
-word_t construct_vararg(word_t target_argc, word_t argc, word_t *esp, word_t *ebp){
-    assert((argc & FIXNUM_MASK) == FIXNUM_TAG);
-    word_t size = argc >> FIXNUM_SHIFT;
-    assert(size == ebp - esp);
-    assert(target_argc - 1 <= size);
-    gc_flip(((size - target_argc + 1) * 2 * sizeof(word_t) * 8) << FIXNUM_SHIFT, esp, ebp);
-    word_t res = NIL_TAG;
-    for(word_t i = 0; size - i >= target_argc; ++i){
-        free_ptr[0] = esp[i];
-        free_ptr[1] = res;
-        res = (word_t)free_ptr | PAIR_TAG;
-        free_ptr += 2;
-    }
-    return res;
+// MISC
+void s_bad_monovariadic_call(word_t argc, word_t argc_got) {
+    fprintf(stderr, "wrong number argument call %"PRIdPTR" but got %"PRIdPTR"\n", argc - 1, argc_got - 1);
+    abort();
+}
+
+void s_bad_polyvariadic_call() {
+    fprintf(stderr, "case-lambda wrong number argument call\n");
+    abort();
+}
+
+void s_bad_apply_call() {
+    fprintf(stderr, "bad apply call\n");
+    abort();
+}
+
+void s_unbound_global(word_t v) {
+    s_write(v, stderr);
+    fprintf(stderr, " variable is unbound\n");
+    abort();
+}
+
+void s_bad_imp_cont() {
+    fprintf(stderr, "bad implicit continuation is not implemented\n");
+    abort();
 }

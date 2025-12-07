@@ -1,3 +1,4 @@
+(let ()
 (define iota
   (case-lambda
     ((n) (iota 0 n 1))
@@ -16,3 +17,4 @@
 (write-line (iota 10))
 (write-line (iota 3 10))
 (write-line (iota 3 10 2))
+)

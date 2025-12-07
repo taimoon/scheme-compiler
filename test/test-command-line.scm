@@ -1,1 +1,2 @@
-(write (command-line)) (newline)
+(write (command-line))
+(newline)

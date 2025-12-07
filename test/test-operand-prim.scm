@@ -1,15 +1,11 @@
 (let ()
-(define (map f xs)
+(define (fold-left f init xs)
   (if (pair? xs)
-      (cons (f (car xs)) (map f (cdr xs)))
-      '()))
-
-(define (write-line x)
-  (write x) (newline))
-
-(write-line
-  (map add1 (list 1 2 3)))
-
-(write-line
-  (map integer? (list 2 3 5 (list 1 2 3) '() #t "something")))
+      (fold-left f (f init (car xs)) (cdr xs))
+      init))
+(define (iota i)
+  (let recur ((j 0))
+    (if (>= j i) '() (cons j (recur (add1 j))))))
+(write (fold-left + 0 (iota 100)))
+(newline)
 )

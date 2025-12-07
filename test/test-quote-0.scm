@@ -1,0 +1,4 @@
+(let ((x '((#(1 2 3) "reimu" marisa (#\t #\f) (#t #f))
+            #((1 2 3) "reimu" marisa #(#\t #\f) #(#t #f)))))
+  (collect)
+  (write x) (newline))

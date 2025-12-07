@@ -1,5 +1,5 @@
 (define %extended-alphabets
-  (list #\! #\$ #\% #\& #\* #\+ #\- #\. #\/ #\: #\< #\= #\> #\? #\@ #\^ #\_ #\~))
+  '(#\! #\$ #\% #\& #\* #\+ #\- #\. #\/ #\: #\< #\= #\> #\? #\@ #\^ #\_ #\~))
 
 (define (memq? x s)
   (if (memq x s) #t #f))
@@ -16,17 +16,17 @@
   (let ([c (read-char p)])
     (cond 
       [(eof-object? c) c]
-      [(eq? c #\') (list 'quote)]
-      [(eq? c #\`) (list 'quasiquote)]
+      [(eq? c #\') '(quote)]
+      [(eq? c #\`) '(quasiquote)]
       [(eq? c #\,)
        (if (eq? (peek-char p) #\@)
-           (begin (read-char p) (list 'unquote-splicing))
-           (list 'unquote))]
+           (begin (read-char p) '(unquote-splicing))
+           '(unquote))]
       [(eq? c #\.)
        (let ([c (peek-char p)])
         (if (or (char-alphabetic? c) (memq? c %extended-alphabets))
             (begin (unread-char c p) (read-identifier p))
-            (list 'dot)))]
+            '(dot)))]
       [(eq? c #\") (read-quote-delimited-string p)]
       [(eq? c #\;) (read-comment p)]
       [(eq? c #\#) (read-hash-prefixed p)]
@@ -36,43 +36,46 @@
            (- (read-number p 10)))]
       [(char-numeric? c) (unread-char c p) (read-number p 10)]
       [(or (char-alphabetic? c) (memq? c %extended-alphabets))
+       ;;; see r6rs lexical syntax
        (unread-char c p)
        (read-identifier p)]
-      [(left-paren? c) (list 'left-paren)]
-      [(right-paren? c) (list 'right-paren)]
+      [(left-paren? c) '(left-paren)]
+      [(right-paren? c) '(right-paren)]
       [(char-whitespace? c) (%next-token p)]
       [else (error '%next-token 'unknown:lexeme c)])))
 
-(define (read-quote-delimited-string p)
-  (define %escaped-string-element
-    (list
-      (list #\" #\")
-      (list #\a (integer->char 7))  ; #\alarm
-      (list #\b (integer->char 8))  ; #\backspace
-      (list #\t (integer->char 9))  ; #\tab
-      (list #\n (integer->char 10)) ; #\linefeed
-      (list #\v (integer->char 11)) ; #\vtab
-      (list #\f (integer->char 12)) ; #\page
-      (list #\r (integer->char 13)) ; #\return
-      (list #\\ #\\)
-    ))
-  (let loop ([i 0] [c (read-char p)] [acm '()])
-    (cond 
-      [(eof-object? c) (error 'read-quote-delimited-string 'open-string c)]
-      [(eq? c #\")
-       (apply string-append (reverse (cons (substring str-buf 0 i) acm)))]
-      [(eq? c #\\)
-       (let* ((c (read-char p))
-              (esc-c (assq c %escaped-string-element)))
-          (if esc-c
-              (string-set! str-buf i (cadr esc-c))
-              (error "unknown escape character" c))
-          (loop (add1 i) (read-char p) acm))]
-      [(>= i (string-length str-buf))
-       (loop 0 c (cons (substring str-buf 0 i) acm))]
-      [else
-       (string-set! str-buf i c)
-       (loop (add1 i) (read-char p) acm)])))
+(define read-quote-delimited-string (let ()
+  (define (read-quote-delimited-string p)
+    (define %escaped-string-element
+      (list
+        (list #\" #\")
+        (list #\a (integer->char 7))  ; #\alarm
+        (list #\b (integer->char 8))  ; #\backspace
+        (list #\t (integer->char 9))  ; #\tab
+        (list #\n (integer->char 10)) ; #\linefeed
+        (list #\v (integer->char 11)) ; #\vtab
+        (list #\f (integer->char 12)) ; #\page
+        (list #\r (integer->char 13)) ; #\return
+        (list #\\ #\\)
+      ))
+    (let loop ([i 0] [c (read-char p)] [acm '()])
+      (cond 
+        [(eof-object? c) (error 'read-quote-delimited-string 'open-string c)]
+        [(eq? c #\")
+        (apply string-append (reverse (cons (substring str-buf 0 i) acm)))]
+        [(eq? c #\\)
+        (let* ((c (read-char p))
+                (esc-c (assq c %escaped-string-element)))
+            (if esc-c
+                (string-set! str-buf i (cadr esc-c))
+                (error "unknown escape character" c))
+            (loop (add1 i) (read-char p) acm))]
+        [(>= i (string-length str-buf))
+        (loop 0 c (cons (substring str-buf 0 i) acm))]
+        [else
+        (string-set! str-buf i c)
+        (loop (add1 i) (read-char p) acm)])))
+  read-quote-delimited-string))
 
 (define (read-comment p)
   (let loop ([c (read-char p)])

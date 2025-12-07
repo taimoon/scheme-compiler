@@ -1,0 +1,6 @@
+(let ()
+(include "./test/test-include/even.scm")
+(include "./test/test-include/odd.scm")
+(write (and (even? 2) (odd? 3) (odd? 5)))
+(newline)
+)

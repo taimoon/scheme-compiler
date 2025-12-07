@@ -1,0 +1,5 @@
+(let ((counter (let ((x 0)) (lambda () (set! x (+ x 1)) x)))
+      (writeln (lambda (x) (write x) (newline))))
+  (writeln (counter))
+  (writeln (counter))
+  (writeln (counter)))

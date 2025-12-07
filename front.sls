@@ -1,6 +1,8 @@
 (library
   (front)
-  (export preprocess)
-  (import
-    (chezscheme))
-  (include "front.scm"))
+  (export
+    preprocess
+    generate-primitive-top-bindings)
+  (import (chezscheme))
+  (begin
+    (include "front.scm")))
