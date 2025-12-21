@@ -6,7 +6,7 @@
 #include <inttypes.h>
 #include <string.h>
 
-#if defined(__x86_64__) || defined(__aarch64__)
+#if defined(__x86_64__) || defined(__aarch64__) || (defined(__riscv) && (__riscv_xlen == 64))
 #define FIXNUM_MASK     0b00000111
 #define FIXNUM_SHIFT    3
 #else
