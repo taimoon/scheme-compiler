@@ -1,4 +1,8 @@
 # Changelog
+## 2025-12-21
+
+- Add RISCV64 backend
+
 ## 2025-12-07
 
 This is a big leap from the previous version. There are many changes in the implementation to support new features.

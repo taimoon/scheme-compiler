@@ -41,6 +41,30 @@ make lib.o LIB=lib.o TARGET_ARCH=amd64 SCM_CC="./compiler-amd64.out" -j
 ./a.out
 ```
 
+# Cross-Compilation Guide
+
+Assume your system has a C cross-compiler installed and the Makefile variable `XGNU_PREFIX` is set to either `aarch64-linux-gnu-` or `riscv64-linux-gnu-`.
+Modify `XGNU_PREFIX` to the appropriate value if your toolchain uses a different prefix.
+
+```bash
+source env.sh
+make clean
+make test_amd64_chez
+
+# riscv64
+make test_riscv64_cross RISCV_HOST_NAME=yourusername@riscv_machine
+
+# arm64
+make test_arm64_cross ARM_HOST_NAME=yourusername@arm_machine
+```
+
+Set the appropriate `*_HOST_NAME` before running `make`.
+
+After a successful build, you will obtain:
+
+- a cross-compiler (e.g. `compiler-arm64-amd64.out`)
+- a native compiler (e.g. `compiler-arm64.out`)
+
 # Features used/supported
 - pair-based pattern matcher
 - Garbage collector

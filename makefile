@@ -9,6 +9,8 @@ TARGET_ARCH ?= amd64
 BOOTSTRAP_TEST ?= 0
 ARM_HOST_NAME ?= 
 ARM_WORKDIR ?= /tmp/scheme-compiler
+RISCV_HOST_NAME ?=
+RISCV_WORKDIR ?= /tmp/scheme-compiler
 CROSS_FLAG ?= 0
 
 ifeq ($(TARGET_ARCH),amd64)
@@ -22,6 +24,9 @@ else ifeq ($(TARGET_ARCH),i686)
 else ifeq ($(TARGET_ARCH),arm64)
 	SCM_RIDER := compiler-rider-arm64.scm
 	SCM_BACKEND := compiler-arm64.scm
+else ifeq ($(TARGET_ARCH),riscv64)
+	SCM_RIDER := compiler-rider-riscv64.scm
+	SCM_BACKEND := compiler-riscv64.scm
 else
     $(error "Unknown machine architecture $(TARGET_ARCH)")
 endif
@@ -245,6 +250,16 @@ cross_compile_arm64_amd64:
 		SCM_XCC="./compiler-arm64-amd64.out" \
 		SCM_NCC_OBJ="./compiler-arm64.o"
 
+.PHONY: cross_compile_riscv64_amd64
+cross_compile_riscv64_amd64:
+	make make_runtime SCM_RUNTIME=runtime64.so TARGET_ARCH=amd64
+	make cross_compile NPROC=$(NPROC) \
+		SCM_RUNTIME=runtime64.so SCM_CC="./compiler-amd64.out" \
+		XTARGET_ARCH=riscv64 \
+		XGNU_PREFIX="riscv64-linux-gnu-" \
+		SCM_XCC="./compiler-riscv64-amd64.out" \
+		SCM_NCC_OBJ="./compiler-riscv64.o"
+
 .PHONY: test_i686_chez
 test_i686_chez:
 	# cross-compile from chez to i686
@@ -271,12 +286,28 @@ else
 	make make_runtime SCM_RUNTIME=runtime.so
 	make from_chez TARGET_ARCH=arm64
 	make test_one_target NPROC=$(NPROC) SCM_RUNTIME=runtime.so SCM_CC="scheme --script compiler.so" SCM_NCC="./compiler-arm64-new.out"
+	TARGET_ARCH=arm64 ./test_psyntax.sh
+endif
+
+.PHONY: test_riscv64
+test_riscv64:
+ifeq ($(CROSS_FLAG),1)
+	make make_runtime SCM_RUNTIME=runtime.so
+	$(CC) $(CFLAGS) $(SCM_NCC_OBJ) runtime.so -o $(SCM_CC)
+	rm -f $(SCM_NCC_OBJ)
+	make bootstrap_3 BOOTSTRAP_TEST=0 NPROC=$(NPROC) SCM_RUNTIME=runtime.so SCM_CC=$(SCM_CC) SCM_NCC="./compiler-riscv64-new.out"
+else
+	# cross-compile from chez to riscv64
+	make from_chez TARGET_ARCH=riscv64
+	make make_runtime SCM_RUNTIME=runtime64.so TARGET_ARCH=riscv64
+	make bootstrap_3 BOOTSTRAP_TEST=0 NPROC=$(NPROC) TARGET_ARCH=riscv64 SCM_RUNTIME="runtime64.so" SCM_CC="scheme --script compiler.so" SCM_NCC="./compiler-riscv64.out"
 endif
 
 .PHONY: test_arm64_cross
 test_arm64_cross:
 	rsync -avh \
 		--exclude=".git" \
+		--exclude=".*" \
 		--exclude="*.so" \
 		--exclude="*.o" \
 		--exclude="*.out" \
@@ -290,13 +321,30 @@ test_arm64_cross:
 		make test_arm64 TARGET_ARCH=arm64 CROSS_FLAG=1 SCM_NCC_OBJ=compiler-arm64.o SCM_CC=./compiler-arm64.out"
 	rsync -avh ${ARM_HOST_NAME}:${ARM_WORKDIR}/compiler-arm64.out .
 
+.PHONY: test_riscv64_cross
+test_riscv64_cross:
+	rsync -avh \
+		--exclude=".git" \
+		--exclude=".*" \
+		--exclude="*.so" \
+		--exclude="*.o" \
+		--exclude="*.out" \
+		. ${RISCV_HOST_NAME}:${RISCV_WORKDIR}
+	ssh ${RISCV_HOST_NAME} "cd ${RISCV_WORKDIR} && make clean"
+	make cross_compile_riscv64_amd64
+	rsync -avh compiler-riscv64.o ${RISCV_HOST_NAME}:${RISCV_WORKDIR}/
+	ssh ${RISCV_HOST_NAME} \
+		"cd ${RISCV_WORKDIR} && \
+		source env.sh && \
+		make test_riscv64 TARGET_ARCH=riscv64 CROSS_FLAG=1 SCM_NCC_OBJ=compiler-riscv64.o SCM_CC=./compiler-riscv64.out"
+	rsync -avh ${RISCV_HOST_NAME}:${RISCV_WORKDIR}/compiler-riscv64.out .
+
 .PHONY: test
 test:
 	make clean
 	make test_amd64_chez
-ifneq ($(strip $(ARM_HOST_NAME)),)
-	make test_arm64_cross
-endif
+	# make test_arm64_cross
+	# make test_riscv64_cross
 	make test_i686_chez
 	# cross-compile from i686 to amd64
 	make cross_compile NPROC=$(NPROC) \
