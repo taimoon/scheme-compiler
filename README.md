@@ -65,16 +65,21 @@ After a successful build, you will obtain:
 - a cross-compiler (e.g. `compiler-arm64-amd64.out`)
 - a native compiler (e.g. `compiler-arm64.out`)
 
-# Features used/supported
-- pair-based pattern matcher
-- Garbage collector
+# Features
+
+Minimal and convenient subset of scheme sufficient to bootstrap this scheme compiler.
+
+- pair-based pattern matcher, `match`
+- cheny garbage collector
 - C-FFI
-- fixnum, unicode, boolean, vector, bytevector, symbol, closure
-- assignment
 - tail call
-- seperate compilation
+- fixnum, unicode, boolean, vector, bytevector, symbol, closure
+- assignment, `set!`
+- separate compilation
 - primitives are value procedures when occurs in operand position
-- variadic procedure, primitive case lambda, apply, tail call apply
+- variadic procedure (e.g. `(lambda x x)`)
+- primitive `case-lambda`
+- apply
 - first-class continuation, `call/cc`
 - multiple-values, `values`
 - dynamic eval, `eval`
