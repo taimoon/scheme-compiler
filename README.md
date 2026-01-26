@@ -70,7 +70,7 @@ After a successful build, you will obtain:
 Minimal and convenient subset of scheme sufficient to bootstrap this scheme compiler.
 
 - pair-based pattern matcher, `match`
-- cheny garbage collector
+- cheney garbage collector
 - C-FFI
 - tail call
 - fixnum, unicode, boolean, vector, bytevector, symbol, closure
